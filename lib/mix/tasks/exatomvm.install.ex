@@ -48,14 +48,22 @@ defmodule Mix.Tasks.Exatomvm.Install do
   @impl Igniter.Mix.Task
 
   def igniter(igniter) do
-    Igniter.Project.MixProject.put_in_keyword(igniter, :project, [:atomvm],
-      start: Igniter.Project.Module.module_name_prefix(igniter),
-      flash_offset: Sourceror.parse_string!("0x250000"),
-      esp32_flash_offset: Sourceror.parse_string!("0x250000"),
-      stm32_flash_offset: Sourceror.parse_string!("0x8080000"),
-      chip: "auto",
-      port: "auto"
-    )
+    Igniter.update_elixir_file(igniter, "mix.exs", fn zipper ->
+      with {:ok, zipper} <- Igniter.Code.Function.move_to_def(zipper, :project, 0),
+           {:ok, zipper} <-
+             Igniter.Code.Keyword.put_in_keyword(
+               zipper,
+               [:atomvm],
+               start: Igniter.Project.Module.module_name_prefix(igniter),
+               flash_offset: Sourceror.parse_string!("0x250000"),
+               esp32_flash_offset: Sourceror.parse_string!("0x250000"),
+               stm32_flash_offset: Sourceror.parse_string!("0x8080000"),
+               chip: "auto",
+               port: "auto"
+             ) do
+        {:ok, zipper}
+      end
+    end)
     |> Igniter.mkdir("avm_deps")
     |> Igniter.Project.Module.find_and_update_module!(
       Igniter.Project.Module.module_name_prefix(igniter),
