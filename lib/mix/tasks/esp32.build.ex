@@ -107,7 +107,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
           atomvm_path
 
         atomvm_url ->
-          clone_or_update_repo(atomvm_url, ref)
+          ExAtomVM.AtomVMBuilder.clone_or_update_repo(atomvm_url, ref)
       end
 
     # Verify AtomVM path exists
@@ -126,8 +126,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     """)
 
     with :ok <- check_esp_idf(idf_path, use_docker, idf_version),
-         :ok <- build_generic_unix(atomvm_path, mbedtls_prefix, clean),
-         :ok <- copy_avm_libraries(atomvm_path),
+         :ok <- ExAtomVM.AtomVMBuilder.build_generic_unix(atomvm_path, mbedtls_prefix, clean),
          :ok <- build_atomvm(atomvm_path, chip, idf_path, idf_version, use_docker, clean) do
       build_dir = Path.join([atomvm_path, "src", "platforms", "esp32", "build"])
       atomvm_img = Path.join([build_dir, "atomvm-#{chip}.img"])
@@ -166,117 +165,6 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     end
   end
 
-  defp clone_or_update_repo(url, ref) do
-    cache_dir =
-      if Code.ensure_loaded?(Mix.Project) do
-        Path.join(Path.dirname(Mix.Project.build_path()), "atomvm_source")
-      else
-        Path.expand("_build/atomvm_source")
-      end
-
-    repo_name = url |> Path.basename() |> String.replace(".git", "")
-    repo_path = Path.join(cache_dir, repo_name)
-
-    if File.dir?(Path.join(repo_path, ".git")) do
-      update_repo(repo_path, ref)
-    else
-      clone_repo(url, repo_path, cache_dir, ref)
-    end
-  end
-
-  defp clone_repo(url, repo_path, cache_dir, ref) do
-    IO.puts("Cloning #{url}")
-    File.mkdir_p!(cache_dir)
-
-    {output, status} =
-      System.cmd("git", ["clone", url, repo_path], stderr_to_stdout: true)
-
-    case status do
-      0 ->
-        IO.puts(output)
-        checkout_ref(repo_path, ref)
-
-      _ ->
-        IO.puts("Error cloning repository:\n#{output}")
-        exit({:shutdown, 1})
-    end
-  end
-
-  defp update_repo(repo_path, ref) do
-    IO.puts("Updating existing repository at #{repo_path}")
-
-    # Fetch all refs from origin
-    {output, status} =
-      System.cmd("git", ["fetch", "origin"],
-        cd: repo_path,
-        stderr_to_stdout: true
-      )
-
-    case status do
-      0 ->
-        IO.puts(output)
-        checkout_ref(repo_path, ref)
-
-      _ ->
-        IO.puts("Error fetching from repository:\n#{output}")
-        exit({:shutdown, 1})
-    end
-  end
-
-  defp checkout_ref(repo_path, ref) do
-    IO.puts("Checking out ref: #{ref}")
-
-    {output, status} =
-      System.cmd("git", ["checkout", ref],
-        cd: repo_path,
-        stderr_to_stdout: true
-      )
-
-    case status do
-      0 ->
-        IO.puts(output)
-        pull_if_branch(repo_path, ref)
-
-      _ ->
-        IO.puts("Error checking out ref:\n#{output}")
-        exit({:shutdown, 1})
-    end
-  end
-
-  defp pull_if_branch(repo_path, ref) do
-    # Check if we're on a branch (not a detached HEAD)
-    {_output, status} =
-      System.cmd("git", ["symbolic-ref", "-q", "HEAD"],
-        cd: repo_path,
-        stderr_to_stdout: true
-      )
-
-    if status == 0 do
-      # We're on a branch, pull latest changes
-      IO.puts("Pulling latest changes for branch #{ref}")
-
-      {output, status} =
-        System.cmd("git", ["pull", "origin", ref],
-          cd: repo_path,
-          stderr_to_stdout: true
-        )
-
-      case status do
-        0 ->
-          IO.puts(output)
-          repo_path
-
-        _ ->
-          IO.puts("Warning: Could not pull changes:\n#{output}")
-          repo_path
-      end
-    else
-      # Detached HEAD (tag or commit), no need to pull
-      IO.puts("Checked out tag or commit (detached HEAD)")
-      repo_path
-    end
-  end
-
   defp check_esp_idf(idf_path, use_docker, idf_version) do
     if use_docker do
       case System.find_executable("docker") do
@@ -308,87 +196,6 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
         idf_path_found ->
           IO.puts("Found ESP-IDF: #{idf_path_found}")
           :ok
-      end
-    end
-  end
-
-  defp build_generic_unix(atomvm_path, mbedtls_prefix, clean) do
-
-    build_dir = Path.join(atomvm_path, "build")
-
-    # Clean build directory if requested
-    if clean and File.dir?(build_dir) do
-      IO.puts("Cleaning generic Unix build directory...")
-      File.rm_rf!(build_dir)
-    end
-
-    # Check if tools and esp32boot already exist
-    packbeam_path = Path.join([build_dir, "tools", "packbeam", "PackBEAM"])
-    esp32boot_path = Path.join([build_dir, "libs", "esp32boot", "elixir_esp32boot.avm"])
-
-    if File.exists?(packbeam_path) and File.exists?(esp32boot_path) do
-      IO.puts("Generic Unix build tools and elixir_esp32boot already exist, skipping...")
-      :ok
-    else
-      IO.puts("Building generic Unix tools and elixir_esp32boot (required for ESP32 build)...")
-      File.mkdir_p!(build_dir)
-
-      # Check if ninja is available, fall back to make if not
-      {build_tool, cmake_generator} =
-        case System.find_executable("ninja") do
-          nil ->
-            IO.puts("Ninja not found, using Make as build system")
-            {"make", []}
-
-          _ninja_path ->
-            IO.puts("Using Ninja as build system")
-            {"ninja", ["-GNinja"]}
-        end
-
-      # Equivalent to: ${MBEDTLS_PREFIX:+-DCMAKE_PREFIX_PATH="$MBEDTLS_PREFIX"}
-      mbedtls_args =
-        if mbedtls_prefix do
-          IO.puts("Using custom MbedTLS from: #{mbedtls_prefix}")
-          ["-DCMAKE_PREFIX_PATH=#{mbedtls_prefix}"]
-        else
-          []
-        end
-
-      # Run cmake: cmake .. ${MBEDTLS_PREFIX:+...} -G Ninja -DCMAKE_BUILD_TYPE=Release -DAVM_BUILD_RUNTIME_ONLY=ON
-      cmake_args =
-        [".."] ++
-          mbedtls_args ++
-          cmake_generator ++ ["-DCMAKE_BUILD_TYPE=Release", "-DAVM_BUILD_RUNTIME_ONLY=ON"]
-
-      {_output, status} =
-        System.cmd("cmake", cmake_args,
-          cd: build_dir,
-          stderr_to_stdout: true,
-          into: IO.stream(:stdio, :line)
-        )
-
-      case status do
-        0 ->
-          IO.puts("Building tools and elixir_esp32boot...")
-
-          {_output, status} =
-            System.cmd(build_tool, ["PackBEAM", "elixir_esp32boot", "exavmlib", "atomvmlib"],
-              cd: build_dir,
-              stderr_to_stdout: true,
-              into: IO.stream(:stdio, :line)
-            )
-
-          case status do
-            0 ->
-              IO.puts("Generic Unix tools and elixir_esp32boot built successfully")
-              :ok
-
-            _ ->
-              {:error, "Failed to build generic Unix tools"}
-          end
-
-        _ ->
-          {:error, "Failed to configure generic Unix build"}
       end
     end
   end
@@ -426,38 +233,6 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
 
       File.write!(sdkconfig_defaults, new_content)
       IO.puts("✓ Updated sdkconfig.defaults to use partitions-elixir.csv")
-    end
-  end
-
-  defp copy_avm_libraries(atomvm_path) do
-    avm_deps_dir = File.cwd!() |> Path.join("avm_deps")
-
-    if File.dir?(avm_deps_dir) do
-      IO.puts("Removing existing avm_deps folder...")
-      File.rm_rf!(avm_deps_dir)
-    end
-
-    IO.puts("Creating avm_deps folder and copying libraries...")
-    File.mkdir_p!(avm_deps_dir)
-
-    build_libs_dir = atomvm_path |> Path.join("build") |> Path.join("libs")
-    avm_files = build_libs_dir |> Path.join("**/*.avm") |> Path.wildcard()
-
-    # Copy each file
-    case avm_files do
-      [] ->
-        IO.puts("Warning: No .avm files found in #{build_libs_dir}")
-        :ok
-
-      files ->
-        Enum.each(files, fn src_path ->
-          dest_path = src_path |> Path.basename() |> then(&Path.join(avm_deps_dir, &1))
-          File.cp!(src_path, dest_path)
-          IO.puts("  Copied #{Path.basename(src_path)}")
-        end)
-
-        IO.puts("✓ Copied #{length(files)} AVM libraries to #{avm_deps_dir}")
-        :ok
     end
   end
 
