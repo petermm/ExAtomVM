@@ -466,6 +466,25 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     build_dir = Path.join([atomvm_path, "src", "platforms", "esp32", "build"])
     platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
 
+    # Copy idf_component.yml if it exists in the project root
+    idf_component_yml = Path.join(File.cwd!(), "idf_component.yml")
+
+    if File.exists?(idf_component_yml) do
+      dest_path = Path.join([platform_dir, "main", "idf_component.yml"])
+      IO.puts("Copying idf_component.yml to #{dest_path}...")
+      File.cp!(idf_component_yml, dest_path)
+    end
+
+    # Copy dependencies.lock if it exists in the project root
+    dependencies_lock = Path.join(File.cwd!(), "dependencies.lock")
+
+    if File.exists?(dependencies_lock) do
+      dest_path = Path.join(platform_dir, "dependencies.lock")
+      IO.puts("Copying dependencies.lock to #{dest_path}...")
+      File.cp!(dependencies_lock, dest_path)
+    end
+
+
     if clean and File.dir?(build_dir) do
       IO.puts("Cleaning build directory...")
       File.rm_rf!(build_dir)
@@ -519,6 +538,17 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
                     into: IO.stream(:stdio, :line)
                   )
                 end
+
+              if build_status == 0 do
+                # Copy dependencies.lock back to project root if it was created/updated
+                repo_dependencies_lock = Path.join(platform_dir, "dependencies.lock")
+
+                if File.exists?(repo_dependencies_lock) do
+                  dest_path = Path.join(File.cwd!(), "dependencies.lock")
+                  IO.puts("Updating dependencies.lock in project root...")
+                  File.cp!(repo_dependencies_lock, dest_path)
+                end
+              end
 
               build_status
 
