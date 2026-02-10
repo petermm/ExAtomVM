@@ -201,10 +201,56 @@ defmodule ExAtomVM.AtomVMBuilder do
   end
 
   defp checkout_ref(repo_path, ref) do
-    IO.puts("Checking out ref: #{ref}")
+    System.cmd("git", ["reset", "--hard"],
+      cd: repo_path,
+      stderr_to_stdout: true
+    )
+
+    case parse_pr_ref(ref) do
+      {:pr, pr_number} ->
+        fetch_and_checkout_pr(repo_path, pr_number)
+
+      :not_pr ->
+        IO.puts("Checking out ref: #{ref}")
+
+        {output, status} =
+          System.cmd("git", ["checkout", ref],
+            cd: repo_path,
+            stderr_to_stdout: true
+          )
+
+        case status do
+          0 ->
+            IO.puts(output)
+            pull_if_branch(repo_path, ref)
+
+          _ ->
+            IO.puts("Error checking out ref:\n#{output}")
+            exit({:shutdown, 1})
+        end
+    end
+  end
+
+  defp parse_pr_ref(ref) do
+    cond do
+      match = Regex.run(~r/^pull\/(\d+)\/head$/, ref) ->
+        {:pr, Enum.at(match, 1)}
+
+      match = Regex.run(~r/^pr\/(\d+)$/, ref) ->
+        {:pr, Enum.at(match, 1)}
+
+      true ->
+        :not_pr
+    end
+  end
+
+  defp fetch_and_checkout_pr(repo_path, pr_number) do
+    branch = "pr-#{pr_number}"
+
+    IO.puts("Fetching PR ##{pr_number}...")
 
     {output, status} =
-      System.cmd("git", ["checkout", ref],
+      System.cmd("git", ["fetch", "origin", "pull/#{pr_number}/head"],
         cd: repo_path,
         stderr_to_stdout: true
       )
@@ -212,10 +258,26 @@ defmodule ExAtomVM.AtomVMBuilder do
     case status do
       0 ->
         IO.puts(output)
-        pull_if_branch(repo_path, ref)
+
+        {output, status} =
+          System.cmd("git", ["checkout", "-B", branch, "FETCH_HEAD"],
+            cd: repo_path,
+            stderr_to_stdout: true
+          )
+
+        case status do
+          0 ->
+            IO.puts(output)
+            IO.puts("Checked out PR ##{pr_number}")
+            repo_path
+
+          _ ->
+            IO.puts("Error checking out PR branch:\n#{output}")
+            exit({:shutdown, 1})
+        end
 
       _ ->
-        IO.puts("Error checking out ref:\n#{output}")
+        IO.puts("Error fetching PR ##{pr_number}:\n#{output}")
         exit({:shutdown, 1})
     end
   end

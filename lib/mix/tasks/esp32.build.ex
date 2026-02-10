@@ -25,7 +25,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
 
     * `--atomvm-path` - Path to local AtomVM repository (optional, overrides URL if both provided)
     * `--atomvm-url` - Git URL to clone AtomVM from (optional, defaults to AtomVM/AtomVM main branch)
-    * `--ref` - Git reference to checkout - branch, tag, or commit SHA (default: main)
+    * `--ref` - Git reference to checkout - branch, tag, commit SHA, or PR (e.g. `pr/1234` or `pull/1234/head`) (default: main)
     * `--chip` - Target chip (default: esp32, options: esp32, esp32s2, esp32s3, esp32c2, esp32c3, esp32c6, esp32h2, esp32p4)
     * `--idf-path` - Path to idf.py executable (default: idf.py)
     * `--use-docker` - Use ESP-IDF Docker image instead of local installation
@@ -58,6 +58,12 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
 
       # Build with custom MbedTLS
       mix atomvm.esp32.build --atomvm-path /path/to/AtomVM --mbedtls-prefix /usr/local/opt/mbedtls@3
+
+      # Build from a pull request (shorthand)
+      mix atomvm.esp32.build --ref pr/1234
+
+      # Build from a pull request (full refspec)
+      mix atomvm.esp32.build --ref pull/1234/head --chip esp32s3
 
   """
   use Mix.Task
@@ -106,7 +112,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
         atomvm_path ->
           atomvm_path
 
-        atomvm_url ->
+        true ->
           ExAtomVM.AtomVMBuilder.clone_or_update_repo(atomvm_url, ref)
       end
 
