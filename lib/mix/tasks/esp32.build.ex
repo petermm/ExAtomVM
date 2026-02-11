@@ -247,13 +247,25 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     build_dir = Path.join([atomvm_path, "src", "platforms", "esp32", "build"])
     platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
 
-    # Copy idf_component.yml if it exists in the project root
+    # Copy idf_component.yml into build tree if the user has one in their project root
     idf_component_yml = Path.join(File.cwd!(), "idf_component.yml")
+
+    idf_component_example = Path.join(File.cwd!(), "idf_component.yml.example")
 
     if File.exists?(idf_component_yml) do
       dest_path = Path.join([platform_dir, "main", "idf_component.yml"])
       IO.puts("Copying idf_component.yml to #{dest_path}...")
       File.cp!(idf_component_yml, dest_path)
+    else
+      unless File.exists?(idf_component_example) do
+        example_src = Application.app_dir(:exatomvm, "priv/idf_component.yml.example")
+        File.cp!(example_src, idf_component_example)
+      end
+
+      IO.puts(
+        "Hint: To add ESP-IDF components (e.g. NIFs), rename the example in your project root:\n" <>
+          "      mv idf_component.yml.example idf_component.yml"
+      )
     end
 
     # Copy dependencies.lock if it exists in the project root
