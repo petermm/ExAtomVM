@@ -26,7 +26,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     * `--atomvm-path` - Path to local AtomVM repository (optional, overrides URL if both provided)
     * `--atomvm-url` - Git URL to clone AtomVM from (optional, defaults to AtomVM/AtomVM main branch)
     * `--ref` - Git reference to checkout - branch, tag, commit SHA, or PR (e.g. `pr/1234` or `pull/1234/head`) (default: main)
-    * `--chip` - Target chip (default: esp32, options: esp32, esp32s2, esp32s3, esp32c2, esp32c3, esp32c6, esp32h2, esp32p4)
+    * `--chip` - Target chip(s), comma-separated for multiple (default: esp32, options: esp32, esp32s2, esp32s3, esp32c2, esp32c3, esp32c6, esp32h2, esp32p4)
     * `--idf-path` - Path to idf.py executable (default: idf.py)
     * `--use-docker` - Use ESP-IDF Docker image instead of local installation
     * `--idf-version` - ESP-IDF version for Docker image (default: v5.5.2)
@@ -65,6 +65,9 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
       # Build from a pull request (full refspec)
       mix atomvm.esp32.build --ref pull/1234/head --chip esp32s3
 
+      # Build for multiple chips
+      mix atomvm.esp32.build --chip esp32,esp32s3,esp32c6
+
   """
   use Mix.Task
 
@@ -96,11 +99,16 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     atomvm_path = Keyword.get(opts, :atomvm_path)
     atomvm_url = Keyword.get(opts, :atomvm_url, @default_atomvm_url)
     ref = Keyword.get(opts, :ref, @default_ref)
-    chip = Keyword.get(opts, :chip, @default_chip)
     idf_path = Keyword.get(opts, :idf_path, @default_idf_path)
     use_docker = Keyword.get(opts, :use_docker, false)
     idf_version = Keyword.get(opts, :idf_version, @default_idf_version)
     clean = Keyword.get(opts, :clean, false)
+
+    chips =
+      opts
+      |> Keyword.get(:chip, @default_chip)
+      |> String.split(",", trim: true)
+      |> Enum.map(&String.trim/1)
 
     # Get mbedtls_prefix from option or environment variable
     mbedtls_prefix =
@@ -122,52 +130,98 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
       exit({:shutdown, 1})
     end
 
+    chips_label = Enum.join(chips, ", ")
+
     IO.puts("""
 
-    Building AtomVM for #{chip} from source
+    Building AtomVM from source
     Repository: #{atomvm_path}
-    Chip: #{chip}
+    Chip(s): #{chips_label}
     Clean build: #{clean}
 
     """)
 
     with :ok <- check_esp_idf(idf_path, use_docker, idf_version),
-         :ok <- ExAtomVM.AtomVMBuilder.build_generic_unix(atomvm_path, mbedtls_prefix, clean),
-         :ok <- build_atomvm(atomvm_path, chip, idf_path, idf_version, use_docker, clean) do
-      build_dir = Path.join([atomvm_path, "src", "platforms", "esp32", "build"])
-      atomvm_img = Path.join([build_dir, "atomvm-#{chip}.img"])
+         :ok <- ExAtomVM.AtomVMBuilder.build_generic_unix(atomvm_path, mbedtls_prefix, clean) do
+      results =
+        chips
+        |> Enum.with_index(1)
+        |> Enum.map(fn {chip, index} ->
+          if length(chips) > 1 do
+            IO.puts("\n━━━ Building chip #{index}/#{length(chips)}: #{chip} ━━━\n")
+          end
 
-      if File.exists?(atomvm_img) do
-        IO.puts("""
+          force_clean = index > 1 or clean
 
-        ✅ Successfully built AtomVM for #{chip}
+          case build_atomvm(atomvm_path, chip, idf_path, idf_version, use_docker, force_clean) do
+            :ok ->
+              build_dir = Path.join([atomvm_path, "src", "platforms", "esp32", "build"])
+              src_img = Path.join([build_dir, "atomvm-#{chip}.img"])
+              img = save_image(src_img, chip)
+              {chip, :ok, img}
 
-        Build directory: #{build_dir}
+            {:error, reason} ->
+              {chip, :error, reason}
+          end
+        end)
 
-        Flashable image: #{atomvm_img}
+      print_summary(results)
 
-        To flash to your device, run:
-          mix atomvm.esp32.install --image #{atomvm_img}
-
-        Or use idf.py:
-          cd #{Path.dirname(build_dir)}
-          idf.py flash
-
-        """)
-      else
-        IO.puts("""
-
-        ⚠️  Build completed but image file not found at expected location:
-        #{atomvm_img}
-
-        Please check the build output above for the actual location.
-
-        """)
+      if Enum.any?(results, fn {_, status, _} -> status == :error end) do
+        exit({:shutdown, 1})
       end
     else
       {:error, reason} ->
         IO.puts("Error: #{reason}")
         exit({:shutdown, 1})
+    end
+  end
+
+  defp print_summary(results) do
+    IO.puts("\n━━━ Build Summary ━━━\n")
+
+    cwd = File.cwd!()
+
+    Enum.each(results, fn
+      {chip, :ok, img} ->
+        if File.exists?(img) do
+          IO.puts("  ✅ #{chip}: #{img}")
+        else
+          IO.puts("  ⚠️  #{chip}: built but image not found at #{img}")
+        end
+
+      {chip, :error, reason} ->
+        IO.puts("  ❌ #{chip}: #{reason}")
+    end)
+
+    successful =
+      Enum.filter(results, fn {_, status, img} -> status == :ok and File.exists?(img) end)
+
+    if successful != [] do
+      IO.puts("\nTo flash a specific image:")
+
+      Enum.each(successful, fn {_chip, _, img} ->
+        IO.puts("  mix atomvm.esp32.install --image #{relative_path(img, cwd)}")
+      end)
+    end
+
+    IO.puts("")
+  end
+
+  defp relative_path(path, cwd) do
+    "./#{Path.relative_to(path, cwd)}"
+  end
+
+  defp save_image(src_img, chip) do
+    output_dir = Path.join([File.cwd!(), "_build", "atomvm_images"])
+    File.mkdir_p!(output_dir)
+    dest_img = Path.join(output_dir, "atomvm-#{chip}.img")
+
+    if File.exists?(src_img) do
+      File.cp!(src_img, dest_img)
+      dest_img
+    else
+      src_img
     end
   end
 
@@ -243,7 +297,6 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
   end
 
   defp build_atomvm(atomvm_path, chip, idf_path, idf_version, use_docker, clean) do
-
     build_dir = Path.join([atomvm_path, "src", "platforms", "esp32", "build"])
     platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
 
@@ -276,7 +329,6 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
       IO.puts("Copying dependencies.lock to #{dest_path}...")
       File.cp!(dependencies_lock, dest_path)
     end
-
 
     if clean and File.dir?(build_dir) do
       IO.puts("Cleaning build directory...")
