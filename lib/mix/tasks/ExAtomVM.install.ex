@@ -87,13 +87,25 @@ defmodule Mix.Tasks.Exatomvm.Install do
         end
       end
     )
-    |> Igniter.create_new_file(
-      "idf_component.yml",
-      Application.app_dir(:exatomvm, "priv/idf_component.yml.example") |> File.read!(),
-      on_exists: :skip
-    )
+    |> then(fn igniter ->
+      template_path = Application.app_dir(:exatomvm, "priv/idf_component.yml.example")
+
+      case File.read(template_path) do
+        {:ok, contents} ->
+          Igniter.create_new_file(igniter, "idf_component.yml", contents, on_exists: :skip)
+
+        {:error, reason} ->
+          Igniter.add_issue(igniter, "Could not read idf_component.yml template: #{inspect(reason)}")
+      end
+    end)
     |> Igniter.Project.Deps.set_dep_option(:exatomvm, :runtime, false)
-    |> Igniter.Project.Deps.set_dep_option(:igniter, :runtime, false)
+    |> then(fn igniter ->
+      if Igniter.Project.Deps.has_dep?(igniter, :igniter) do
+        Igniter.Project.Deps.set_dep_option(igniter, :igniter, :runtime, false)
+      else
+        igniter
+      end
+    end)
     |> output_instructions(selected_instructions)
   end
 
@@ -106,8 +118,7 @@ defmodule Mix.Tasks.Exatomvm.Install do
     """
   end
 
-  defp output_instructions(igniter, selected_instructions)
-       when selected_instructions == "ESP32" do
+  defp output_instructions(igniter, "ESP32") do
     igniter
     |> Igniter.add_notice("ESP32 Setup Instructions")
     |> Igniter.add_notice("""
@@ -137,8 +148,7 @@ defmodule Mix.Tasks.Exatomvm.Install do
     """)
   end
 
-  defp output_instructions(igniter, selected_instructions)
-       when selected_instructions == "Pico" do
+  defp output_instructions(igniter, "Pico") do
     igniter
     |> Igniter.add_notice("Raspberry Pi Pico Setup Instructions")
     |> Igniter.add_notice("""
@@ -160,8 +170,7 @@ defmodule Mix.Tasks.Exatomvm.Install do
     """)
   end
 
-  defp output_instructions(igniter, selected_instructions)
-       when selected_instructions == "STM32" do
+  defp output_instructions(igniter, "STM32") do
     igniter
     |> Igniter.add_notice("STM32 Setup Instructions")
     |> Igniter.add_notice("""
@@ -188,12 +197,13 @@ defmodule Mix.Tasks.Exatomvm.Install do
     """)
   end
 
-  defp output_instructions(igniter, selected_instructions)
-       when selected_instructions == "All" do
+  defp output_instructions(igniter, "All") do
     igniter
     |> output_instructions("ESP32")
     |> output_instructions("Pico")
     |> output_instructions("STM32")
   end
+
+  defp output_instructions(igniter, _), do: igniter
 end
 end
