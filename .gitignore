@@ -4,6 +4,9 @@
 # If you run "mix test --cover", coverage assets end up here.
 /cover/
 
+# ExUnit tmp_dir scratch space.
+/tmp/
+
 # The directory Mix downloads your dependencies sources to.
 /deps/
 
@@ -21,4 +24,3 @@ erl_crash.dump
 
 # Ignore package tarball (built via "mix hex.build").
 exatomvm-*.tar
-
