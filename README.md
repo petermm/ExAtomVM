@@ -295,6 +295,8 @@ In addition, you may specify AtomVM-specific configuration using the `atomvm` ta
 
 The `atomvm.packbeam` task is used to bundle your application into an AVM file that can be flashed to a micro-controller and executed by the AtomVM virtual machine.
 
+The task always consolidates Elixir protocols before packing and includes the consolidated BEAM files in the resulting AVM. This applies in every Mix environment, even when the project sets `consolidate_protocols: false`.
+
 The `atomvm` properties list in the Mix project file (`mix.exs`) may contain the following entries related to this task:
 
 | Key | Type | Default | Value |

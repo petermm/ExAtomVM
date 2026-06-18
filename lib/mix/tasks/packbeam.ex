@@ -9,6 +9,7 @@ defmodule Mix.Tasks.Atomvm.Packbeam do
   > #### Info {: .info}
   >
   > Normally using this task manually is not required, it is called automatically by `atomvm.esp32.flash`, `atomvm.stm32.flash` and `atomvm.pico.flash`.
+  > The task always consolidates protocols before packing, regardless of the current Mix environment or the project's `:consolidate_protocols` setting.
 
   ## Usage example
 
@@ -44,6 +45,7 @@ defmodule Mix.Tasks.Atomvm.Packbeam do
          {:atomvm, {:ok, avm_config}} <- {:atomvm, Keyword.fetch(config, :atomvm)},
          {:start, {:ok, start_module}} <-
            {:start, Map.get(options, :start, Keyword.fetch(avm_config, :start))},
+         :ok <- consolidate_protocols(),
          :ok <- pack_avm_deps(),
          :ok <- pack_priv(),
          start_beam_file = "#{Atom.to_string(start_module)}.beam",
@@ -95,8 +97,35 @@ defmodule Mix.Tasks.Atomvm.Packbeam do
   end
 
   defp list_dep_beams() do
+    consolidated_beams = consolidated_beams_by_name()
+
     runtime_deps_beams()
+    |> Enum.reject(&Map.has_key?(consolidated_beams, Path.basename(&1)))
     |> Enum.map(fn beam_file -> {beam_file, :beam} end)
+  end
+
+  defp consolidate_protocols() do
+    if Version.match?(System.version(), ">= 1.19.0") do
+      run_compiler("compile.elixir", ["--force", "--consolidate-protocols"])
+    else
+      run_compiler("compile.protocols", ["--force"])
+    end
+  end
+
+  defp run_compiler(task, args) do
+    Mix.Task.reenable(task)
+
+    case Mix.Task.run(task, args) do
+      :error -> :error
+      {:error, _diagnostics} -> :error
+      _ -> :ok
+    end
+  end
+
+  defp consolidated_beams_by_name() do
+    Project.consolidation_path()
+    |> beam_files()
+    |> Map.new(fn path -> {Path.basename(path), path} end)
   end
 
   def beam_files(path) do
@@ -153,13 +182,18 @@ defmodule Mix.Tasks.Atomvm.Packbeam do
   end
 
   defp pack_beams(beams_path, start_beam_file, out) do
-    beams_path
-    |> File.ls!()
-    |> Enum.filter(fn file -> String.ends_with?(file, ".beam") end)
-    |> List.delete(start_beam_file)
-    |> Enum.map(fn file -> {file, :beam} end)
-    |> List.insert_at(0, {start_beam_file, :beam_start})
-    |> Enum.map(fn {file, opts} -> {Path.join(Project.compile_path(), file), opts} end)
+    consolidated_beams = consolidated_beams_by_name()
+
+    project_beams =
+      beams_path
+      |> beam_files()
+      |> Map.new(fn path -> {Path.basename(path), path} end)
+      |> Map.merge(consolidated_beams)
+
+    project_beams
+    |> Map.delete(start_beam_file)
+    |> Enum.map(fn {_file, path} -> {path, :beam} end)
+    |> List.insert_at(0, {Map.fetch!(project_beams, start_beam_file), :beam_start})
     |> Enum.concat([{"deps.avm", :avm}, {"priv.avm", :avm}])
     |> PackBEAM.make_avm(out)
   end
