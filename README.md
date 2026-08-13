@@ -330,6 +330,10 @@ The `atomvm` properties list in the Mix project file (`mix.exs`) may contain the
 
 Properties in the `mix.exs` file may be over-ridden on the command line using long-style flags (prefixed by `--`) by the same name as the properties key.  For example, you can use the `--port` option to specify or override the `port` property in the above table.
 
+After each successful flash, ExAtomVM caches the application image under the Mix build directory. If the cached image is present and esptool supports [`--diff-with`](https://docs.espressif.com/projects/esptool/en/latest/esp32/esptool/basic-commands.html#fast-reflashing) (esptool 5.2 or later), subsequent flashes automatically rewrite only changed 4KB sectors. The Pythonx integration uses esptool 5.3. The cache is replaced only after a successful flash, and `mix clean` removes it.
+
+Use `--clean` to discard the cached image, perform one full application flash, and establish a fresh baseline. This does not erase the whole device. Use `--trust-flash-content` to additionally skip esptool's verification of unchanged content; only use this when the same device has not been erased or modified by another flashing tool since the prior successful flash.
+
 If the `IDF_PATH` environment variable is set, then the `esptool.py` from the [IDF SDK](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/index.html) installation will be used to flash the application to the ESP32 device.  Otherwise, this plugin will attempt to use the `esptool.py` program from the user's `PATH` environment variable.  The [ESP Tool](https://github.com/espressif/esptool) Python3 application can be installed from source or via many popular package managers.  Consult your local OS documentation for more information.
 
 Example:

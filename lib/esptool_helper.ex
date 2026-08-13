@@ -19,7 +19,7 @@ defmodule ExAtomVM.EsptoolHelper do
         version = "0.0.0"
         requires-python = "==3.13.*"
         dependencies = [
-          "esptool==5.0.2"
+          "esptool==5.3.1"
         ]
         """)
 
@@ -77,7 +77,7 @@ defmodule ExAtomVM.EsptoolHelper do
                   result = exit_code == 0
               except Exception as e:
                   print(f"Warning: {e}")
-                  result = True
+                  result = False
 
           """,
           %{"tool_args" => tool_args}

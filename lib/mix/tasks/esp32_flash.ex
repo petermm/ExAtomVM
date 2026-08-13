@@ -35,6 +35,13 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
   $ mix atomvm.esp32.flash --port auto
   `
 
+  Subsequent successful flashes use esptool's differential flashing when supported. To discard
+  the cached previous image and perform a full application flash, use
+
+  `
+  $ mix atomvm.esp32.flash --clean
+  `
+
   ## Configuration
 
   ExAtomVM can be configured from the mix.ex file and supports the following settings for the
@@ -55,6 +62,23 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
   as the [supported properties](#module-configuration)
 
   For example, you can use the `--port` option to specify or override the port property.
+
+    * `--clean` - Discard the cached previous application image and perform a full application
+      flash. This does not erase the whole device.
+
+    * `--trust-flash-content` - Skip esptool's check of unchanged flash content. This is faster,
+      but should only be used when the device has not been erased, flashed by another tool, or
+      replaced since the previous successful flash.
+
+  ## Differential flashing
+
+  After a successful flash, ExAtomVM caches the application image below the Mix build directory.
+  When that image is present and esptool supports `--diff-with`, later flashes only rewrite changed
+  4KB sectors. The cache is updated only after esptool reports success.
+
+  `--trust-flash-content` is never enabled automatically. Without it, esptool verifies the expected
+  flash contents and falls back to a full application rewrite if they do not match. `mix clean` and
+  `mix atomvm.esp32.flash --clean` both discard the differential-flashing baseline.
   """
 
   alias Mix.Project
@@ -76,7 +100,10 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
       flash_offset =
         Map.get(options, :flash_offset, Keyword.get(avm_config, :flash_offset, 0x250000))
 
-      flash(idf_path, chip, port, baud, flash_offset)
+      flash(idf_path, chip, port, baud, flash_offset,
+        clean: Map.get(options, :clean, false),
+        trust_flash_content: Map.get(options, :trust_flash_content, false)
+      )
     else
       {:atomvm, :error} ->
         IO.puts("error: missing AtomVM project config.")
@@ -92,7 +119,84 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
     end
   end
 
-  def flash(idf_path, chip, port, baud, flash_offset) do
+  def flash(idf_path, chip, port, baud, flash_offset, opts \\ []) do
+    app = Project.config()[:app]
+    image_path = Path.expand("#{app}.avm")
+    cache_path = flash_cache_path(app, flash_offset)
+
+    if Keyword.get(opts, :clean, false) do
+      clear_flash_cache(cache_path)
+    end
+
+    previous_image = if File.regular?(cache_path), do: cache_path
+    trust_flash_content = Keyword.get(opts, :trust_flash_content, false)
+
+    case Code.ensure_loaded(Pythonx) do
+      {:module, Pythonx} ->
+        IO.puts("Flashing using Pythonx installed esptool..")
+        ExAtomVM.EsptoolHelper.setup()
+
+        tool_args =
+          flash_tool_args(chip, port, baud, flash_offset, image_path,
+            previous_image: previous_image,
+            trust_flash_content: trust_flash_content,
+            modern: true
+          )
+
+        report_differential_flash(previous_image, trust_flash_content)
+
+        case ExAtomVM.EsptoolHelper.flash_pythonx(tool_args) do
+          true ->
+            save_flash_cache(image_path, cache_path)
+            :ok
+
+          false ->
+            exit({:shutdown, 1})
+        end
+
+      _ ->
+        IO.puts("Flashing using esptool..")
+        tool_full_path = get_esptool_path(idf_path)
+        {tool_exec, prefix_args} = resolve_esptool_exec(tool_full_path, idf_path)
+
+        diff_supported =
+          is_nil(previous_image) or esptool_supports_diff?(tool_exec, prefix_args)
+
+        previous_image = if diff_supported, do: previous_image
+        effective_trust = trust_flash_content and diff_supported
+
+        if not diff_supported do
+          IO.puts(
+            "Cached application image found, but this esptool does not support --diff-with; performing a full application flash."
+          )
+        end
+
+        tool_args =
+          flash_tool_args(chip, port, baud, flash_offset, image_path,
+            previous_image: previous_image,
+            trust_flash_content: effective_trust
+          )
+
+        report_differential_flash(previous_image, effective_trust)
+
+        case System.cmd(
+               tool_exec,
+               prefix_args ++ tool_args,
+               stderr_to_stdout: true,
+               into: IO.stream(:stdio, 1)
+             ) do
+          {_, 0} ->
+            save_flash_cache(image_path, cache_path)
+            :ok
+
+          {_, _status} ->
+            exit({:shutdown, 1})
+        end
+    end
+  end
+
+  @doc false
+  def flash_tool_args(chip, port, baud, flash_offset, image_path, opts \\ []) do
     tool_args = [
       "--chip",
       chip,
@@ -111,44 +215,105 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
       "--flash_size",
       "detect",
       "0x#{Integer.to_string(flash_offset, 16)}",
-      "#{Project.config()[:app]}.avm"
+      image_path
     ]
 
     tool_args = if port == "auto", do: tool_args, else: ["--port", port] ++ tool_args
 
-    case Code.ensure_loaded(Pythonx) do
-      {:module, Pythonx} ->
-        IO.puts("Flashing using Pythonx installed esptool..")
-        ExAtomVM.EsptoolHelper.setup()
+    tool_args =
+      case Keyword.get(opts, :previous_image) do
+        nil -> tool_args
+        previous_image -> tool_args ++ ["--diff-with", previous_image]
+      end
 
-        # avoid deprecation warnings, as we know we are esptool version 5+, when using Pythonx.
-        tool_args =
-          Enum.map(tool_args, fn
-            "--flash_mode" -> "--flash-mode"
-            "--flash_freq" -> "--flash-freq"
-            "--flash_size" -> "--flash-size"
-            "default_reset" -> "default-reset"
-            "hard_reset" -> "hard-reset"
-            "write_flash" -> "write-flash"
-            arg -> arg
-          end)
+    tool_args =
+      if Keyword.get(opts, :trust_flash_content, false) and
+           not is_nil(Keyword.get(opts, :previous_image)) do
+        tool_args ++ ["--trust-flash-content"]
+      else
+        tool_args
+      end
 
-        case ExAtomVM.EsptoolHelper.flash_pythonx(tool_args) do
-          true -> exit({:shutdown, 0})
-          false -> exit({:shutdown, 1})
-        end
+    if Keyword.get(opts, :modern, false) do
+      # Avoid deprecation warnings for the pinned Pythonx esptool 5.x.
+      Enum.map(tool_args, fn
+        "--flash_mode" -> "--flash-mode"
+        "--flash_freq" -> "--flash-freq"
+        "--flash_size" -> "--flash-size"
+        "default_reset" -> "default-reset"
+        "hard_reset" -> "hard-reset"
+        "write_flash" -> "write-flash"
+        arg -> arg
+      end)
+    else
+      tool_args
+    end
+  end
 
-      _ ->
-        IO.puts("Flashing using esptool..")
-        tool_full_path = get_esptool_path(idf_path)
-        {tool_exec, prefix_args} = resolve_esptool_exec(tool_full_path, idf_path)
+  @doc false
+  def flash_cache_path(app, flash_offset, manifest_path \\ Project.manifest_path()) do
+    filename = "#{app}-0x#{Integer.to_string(flash_offset, 16)}.avm"
 
-        System.cmd(
-          tool_exec,
-          prefix_args ++ tool_args,
-          stderr_to_stdout: true,
-          into: IO.stream(:stdio, 1)
+    [manifest_path, "atomvm", "esp32", "flash", filename]
+    |> Path.join()
+    |> Path.expand()
+  end
+
+  @doc false
+  def cache_flash_image(image_path, cache_path) do
+    with :ok <- File.mkdir_p(Path.dirname(cache_path)),
+         :ok <- File.cp(image_path, cache_path) do
+      :ok
+    end
+  end
+
+  defp clear_flash_cache(cache_path) do
+    case File.rm(cache_path) do
+      :ok ->
+        IO.puts("Discarded cached application image; performing a full application flash.")
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        Mix.raise("Could not remove cached application image #{cache_path}: #{inspect(reason)}")
+    end
+  end
+
+  defp save_flash_cache(image_path, cache_path) do
+    case cache_flash_image(image_path, cache_path) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        IO.warn(
+          "Flash succeeded, but the differential-flashing cache could not be updated: #{inspect(reason)}"
         )
+    end
+  end
+
+  defp report_differential_flash(nil, true) do
+    IO.puts(
+      "--trust-flash-content requires a previous successful flash; performing a full application flash and establishing a baseline."
+    )
+  end
+
+  defp report_differential_flash(nil, false), do: :ok
+
+  defp report_differential_flash(previous_image, trust_flash_content) do
+    message = "Using cached application image for differential flashing: #{previous_image}"
+
+    if trust_flash_content do
+      IO.puts(message <> " (trusting unchanged flash content)")
+    else
+      IO.puts(message)
+    end
+  end
+
+  defp esptool_supports_diff?(tool_exec, prefix_args) do
+    case System.cmd(tool_exec, prefix_args ++ ["write_flash", "--help"], stderr_to_stdout: true) do
+      {help, 0} -> String.contains?(help, "--diff-with")
+      _ -> false
     end
   end
 
@@ -205,6 +370,14 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
 
   defp parse_args([<<"--chip">>, chip | t], accum) do
     parse_args(t, Map.put(accum, :chip, chip))
+  end
+
+  defp parse_args([<<"--clean">> | t], accum) do
+    parse_args(t, Map.put(accum, :clean, true))
+  end
+
+  defp parse_args([<<"--trust-flash-content">> | t], accum) do
+    parse_args(t, Map.put(accum, :trust_flash_content, true))
   end
 
   defp parse_args([<<"--flash_offset">>, "0x" <> hex = _flash_offset | t], accum) do
