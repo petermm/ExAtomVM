@@ -56,6 +56,10 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
 
     * `:baud` - The BAUD rate used when flashing to device, defaults to `115200`.
 
+    * `:max_size` - Maximum application AVM size in bytes, defaults to `0x100000` (1 MiB),
+      matching AtomVM's standard ESP32 `main.avm` partition. Slot padding is reduced to
+      fit; compact content that exceeds the limit is not flashed.
+
   ## Command line options
 
   Properties in the mix.exs file may be over-ridden on the command line using long-style flags (prefixed by --) by the same name
@@ -69,6 +73,9 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
     * `--trust-flash-content` - Skip esptool's check of unchanged flash content. This is faster,
       but should only be used when the device has not been erased, flashed by another tool, or
       replaced since the previous successful flash.
+
+    * `--max-size` - Override the maximum application AVM size in decimal or hexadecimal bytes.
+      Only increase this when the device partition table provides a larger `main.avm` partition.
 
   ## Differential flashing
 
@@ -85,13 +92,14 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
   alias Mix.Tasks.Atomvm.Packbeam
 
   @esp_tool_path "/components/esptool_py/esptool/esptool.py"
+  @default_max_size 0x100000
 
   def run(args) do
     config = Project.config()
 
     with {:atomvm, {:ok, avm_config}} <- {:atomvm, Keyword.fetch(config, :atomvm)},
          {:args, {:ok, options}} <- {:args, parse_args(args)},
-         {:pack, {:ok, _}} <- {:pack, Packbeam.run(args)},
+         {:pack, {:ok, _}} <- {:pack, Packbeam.run(args, packbeam_options())},
          idf_path <- System.get_env("IDF_PATH", <<"">>) do
       chip = Map.get(options, :chip, Keyword.get(avm_config, :chip, "auto"))
       port = Map.get(options, :port, Keyword.get(avm_config, :port, "/dev/ttyUSB0"))
@@ -117,6 +125,14 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
         IO.puts("error: failed PackBEAM, target will not be flashed.")
         exit({:shutdown, 1})
     end
+  end
+
+  @doc false
+  def default_max_size, do: @default_max_size
+
+  @doc false
+  def packbeam_options(env \\ Mix.env()) do
+    [max_size: default_max_size(), slot_modules: env == :dev]
   end
 
   def flash(idf_path, chip, port, baud, flash_offset, opts \\ []) do

@@ -295,13 +295,16 @@ In addition, you may specify AtomVM-specific configuration using the `atomvm` ta
 
 The `atomvm.packbeam` task is used to bundle your application into an AVM file that can be flashed to a micro-controller and executed by the AtomVM virtual machine.
 
+PackBEAM places dependency and private-content archives first, followed by deterministically ordered application modules and the start module last. Keeping stable content at the front prevents application size changes from shifting the dependency archive and improves ESP32 differential flashing. When `atomvm.esp32.flash` invokes PackBEAM in a development build, dependency and private-content archives use 16 KiB-bucketed slots, and application modules use 4 KiB slots with at least 1 KiB of headroom. The archive slots align the application region to flash-sector boundaries and contain typical archive size changes. Standalone PackBEAM, Pico, STM32, and production builds remain compact. When a `max_size` is configured, PackBEAM reduces slot padding as needed and refuses to produce an archive when the compact content itself exceeds the limit.
+
 The `atomvm` properties list in the Mix project file (`mix.exs`) may contain the following entries related to this task:
 
 | Key | Type | Default | Value |
 |-----|------|----------|-------|
 | `start` | Module | - | The name of the module containing the `start/0` entrypoint function |
+| `max_size` | integer | - | Optional maximum output AVM size in bytes; padding is reduced to fit, while oversized compact content is rejected |
 
-Properties in the `mix.exs` file may be over-ridden on the command line using long-style flags (prefixed by `--`) by the same name as the properties key.  For example, you can use the `--start` option to specify or override the `start` property in the above table.
+Properties in the `mix.exs` file may be over-ridden on the command line using long-style flags (prefixed by `--`) by the same name as the properties key. For example, you can use `--start` to override the start module or `--max-size 0x100000` to set a maximum output size.
 
 Example:
 
@@ -327,6 +330,7 @@ The `atomvm` properties list in the Mix project file (`mix.exs`) may contain the
 | `chip` | `esp32` | `esp32` | Chip type |
 | `port` | device path | `/dev/ttyUSB0` | Port to which device is connected on host computer |
 | `baud` | integer | 115200 | BAUD rate used when flashing to device |
+| `max_size` | integer | `0x100000` | Maximum application AVM size in bytes; the default matches AtomVM's standard 1 MiB ESP32 `main.avm` partition |
 
 Properties in the `mix.exs` file may be over-ridden on the command line using long-style flags (prefixed by `--`) by the same name as the properties key.  For example, you can use the `--port` option to specify or override the `port` property in the above table.
 

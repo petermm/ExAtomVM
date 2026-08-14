@@ -35,6 +35,16 @@ defmodule Mix.Tasks.Atomvm.Esp32.FlashTest do
            ]
   end
 
+  test "uses the standard one MiB main.avm partition size by default" do
+    assert Flash.default_max_size() == 0x100000
+  end
+
+  test "enables slots only for ESP32 development packing" do
+    assert Flash.packbeam_options(:dev) == [max_size: 0x100000, slot_modules: true]
+    assert Flash.packbeam_options(:prod) == [max_size: 0x100000, slot_modules: false]
+    assert Flash.packbeam_options(:test) == [max_size: 0x100000, slot_modules: false]
+  end
+
   test "does not pass trust-flash-content without a previous image" do
     args =
       Flash.flash_tool_args("esp32", "/dev/ttyUSB0", "115200", 0x250000, "current.avm",
