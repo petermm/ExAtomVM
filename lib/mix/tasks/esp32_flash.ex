@@ -77,11 +77,17 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
     * `--max-size` - Override the maximum application AVM size in decimal or hexadecimal bytes.
       Only increase this when the device partition table provides a larger `main.avm` partition.
 
+    * `--no-compress` - Disable esptool serial compression. Compression is enabled by default;
+      this option is primarily useful for benchmarking or troubleshooting.
+
   ## Differential flashing
 
   After a successful flash, ExAtomVM caches the application image below the Mix build directory.
   When that image is present and esptool supports `--diff-with`, later flashes only rewrite changed
   4KB sectors. The cache is updated only after esptool reports success.
+
+  ESP32 application images use esptool's default serial compression. This is particularly useful
+  for clean flashes of development images containing zero-filled slot padding.
 
   `--trust-flash-content` is never enabled automatically. Without it, esptool verifies the expected
   flash contents and falls back to a full application rewrite if they do not match. `mix clean` and
@@ -110,7 +116,8 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
 
       flash(idf_path, chip, port, baud, flash_offset,
         clean: Map.get(options, :clean, false),
-        trust_flash_content: Map.get(options, :trust_flash_content, false)
+        trust_flash_content: Map.get(options, :trust_flash_content, false),
+        no_compress: Map.get(options, :no_compress, false)
       )
     else
       {:atomvm, :error} ->
@@ -146,6 +153,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
 
     previous_image = if File.regular?(cache_path), do: cache_path
     trust_flash_content = Keyword.get(opts, :trust_flash_content, false)
+    no_compress = Keyword.get(opts, :no_compress, false)
 
     case Code.ensure_loaded(Pythonx) do
       {:module, Pythonx} ->
@@ -156,6 +164,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
           flash_tool_args(chip, port, baud, flash_offset, image_path,
             previous_image: previous_image,
             trust_flash_content: trust_flash_content,
+            no_compress: no_compress,
             modern: true
           )
 
@@ -190,7 +199,8 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
         tool_args =
           flash_tool_args(chip, port, baud, flash_offset, image_path,
             previous_image: previous_image,
-            trust_flash_content: effective_trust
+            trust_flash_content: effective_trust,
+            no_compress: no_compress
           )
 
         report_differential_flash(previous_image, effective_trust)
@@ -213,26 +223,38 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
 
   @doc false
   def flash_tool_args(chip, port, baud, flash_offset, image_path, opts \\ []) do
-    tool_args = [
-      "--chip",
-      chip,
-      "--baud",
-      baud,
-      "--before",
-      "default_reset",
-      "--after",
-      "hard_reset",
-      "write_flash",
-      "-u",
-      "--flash_mode",
-      "keep",
-      "--flash_freq",
-      "keep",
-      "--flash_size",
-      "detect",
-      "0x#{Integer.to_string(flash_offset, 16)}",
-      image_path
-    ]
+    modern? = Keyword.get(opts, :modern, false)
+
+    compression_args =
+      if Keyword.get(opts, :no_compress, false) do
+        [if(modern?, do: "--no-compress", else: "-u")]
+      else
+        []
+      end
+
+    tool_args =
+      [
+        "--chip",
+        chip,
+        "--baud",
+        baud,
+        "--before",
+        "default_reset",
+        "--after",
+        "hard_reset",
+        "write_flash"
+      ] ++
+        compression_args ++
+        [
+          "--flash_mode",
+          "keep",
+          "--flash_freq",
+          "keep",
+          "--flash_size",
+          "detect",
+          "0x#{Integer.to_string(flash_offset, 16)}",
+          image_path
+        ]
 
     tool_args = if port == "auto", do: tool_args, else: ["--port", port] ++ tool_args
 
@@ -250,7 +272,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
         tool_args
       end
 
-    if Keyword.get(opts, :modern, false) do
+    if modern? do
       # Avoid deprecation warnings for the pinned Pythonx esptool 5.x.
       Enum.map(tool_args, fn
         "--flash_mode" -> "--flash-mode"
@@ -368,9 +390,12 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
     {python, [tool_full_path]}
   end
 
-  defp parse_args(args) do
+  @doc false
+  def parse_options(args) do
     parse_args(args, %{})
   end
+
+  defp parse_args(args), do: parse_options(args)
 
   defp parse_args([], accum) do
     {:ok, accum}
@@ -394,6 +419,10 @@ defmodule Mix.Tasks.Atomvm.Esp32.Flash do
 
   defp parse_args([<<"--trust-flash-content">> | t], accum) do
     parse_args(t, Map.put(accum, :trust_flash_content, true))
+  end
+
+  defp parse_args([<<"--no-compress">> | t], accum) do
+    parse_args(t, Map.put(accum, :no_compress, true))
   end
 
   defp parse_args([<<"--flash_offset">>, "0x" <> hex = _flash_offset | t], accum) do

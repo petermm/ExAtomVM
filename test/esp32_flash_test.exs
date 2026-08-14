@@ -39,6 +39,34 @@ defmodule Mix.Tasks.Atomvm.Esp32.FlashTest do
     assert Flash.default_max_size() == 0x100000
   end
 
+  test "uses esptool serial compression by default" do
+    args = Flash.flash_tool_args("esp32", "auto", "115200", 0x250000, "current.avm")
+
+    refute "-u" in args
+    refute "--no-compress" in args
+  end
+
+  test "supports disabling compression for benchmarks" do
+    assert {:ok, %{no_compress: true}} = Flash.parse_options(["--no-compress"])
+
+    legacy_args =
+      Flash.flash_tool_args("esp32", "auto", "115200", 0x250000, "current.avm", no_compress: true)
+
+    modern_args =
+      Flash.flash_tool_args("esp32", "auto", "115200", 0x250000, "current.avm",
+        no_compress: true,
+        modern: true
+      )
+
+    assert legacy_write_index = Enum.find_index(legacy_args, &(&1 == "write_flash"))
+    assert modern_write_index = Enum.find_index(modern_args, &(&1 == "write-flash"))
+
+    assert Enum.at(legacy_args, legacy_write_index + 1) == "-u"
+    refute "--no-compress" in legacy_args
+    assert Enum.at(modern_args, modern_write_index + 1) == "--no-compress"
+    refute "-u" in modern_args
+  end
+
   test "enables slots only for ESP32 development packing" do
     assert Flash.packbeam_options(:dev) == [max_size: 0x100000, slot_modules: true]
     assert Flash.packbeam_options(:prod) == [max_size: 0x100000, slot_modules: false]
