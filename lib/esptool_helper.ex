@@ -1,10 +1,14 @@
 defmodule ExAtomVM.EsptoolHelper do
   @moduledoc """
-  Module for setting up and using esptool through Pythonx.
+  Module for setting up and using esptool and the other ESP32 Python tools
+  through Pythonx.
   """
 
   # Pythonx is an optional dependency.
   @compile {:no_warn_undefined, Pythonx}
+
+  @esptool_dependency "esptool==5.0.2"
+  @idf_monitor_dependency "esp-idf-monitor==1.10.0"
 
   @doc """
   Initializes Python environment with project configuration.
@@ -12,9 +16,23 @@ defmodule ExAtomVM.EsptoolHelper do
   as we need the read to memory (instead of only to file) features.
   """
   def setup do
+    init_python([@esptool_dependency])
+  end
+
+  @doc """
+  Initializes Python environment with esptool and the ESP-IDF monitor.
+  """
+  def setup_idf_monitor do
+    init_python([@esptool_dependency, @idf_monitor_dependency])
+  end
+
+  defp init_python(dependencies) do
     case Code.ensure_loaded(Pythonx) do
       {:module, Pythonx} ->
         Application.ensure_all_started(:pythonx)
+
+        dependencies =
+          Enum.map_join(dependencies, ",\n", fn dependency -> ~s(  "#{dependency}") end)
 
         Pythonx.uv_init("""
         [project]
@@ -22,7 +40,7 @@ defmodule ExAtomVM.EsptoolHelper do
         version = "0.0.0"
         requires-python = "==3.13.*"
         dependencies = [
-          "esptool==5.0.2"
+        #{dependencies}
         ]
         """)
 
@@ -579,6 +597,58 @@ defmodule ExAtomVM.EsptoolHelper do
         case Pythonx.decode(result) do
           nil -> :ok
           message -> {:error, {:serial_port, message}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Shows what a board writes on its serial port through the ESP-IDF monitor,
+  for the timeout in seconds when one is given.
+
+  The monitor is installed by `setup_idf_monitor/0`. Extra arguments for the
+  monitor, such as the ELF files to decode addresses with, are passed in
+  `:args`.
+  """
+  def idf_monitor(port, baud, opts \\ []) do
+    reset = Keyword.get(opts, :reset, true)
+    timeout = Keyword.get(opts, :timeout)
+    extra_args = Keyword.get(opts, :args, [])
+
+    tool_args =
+      ["--port", port, "--baud", Integer.to_string(baud)] ++
+        if(reset, do: [], else: ["--no-reset"]) ++ extra_args
+
+    case (try do
+            Pythonx.eval(
+              """
+              import subprocess
+              import sys
+
+              tool_args = [arg.decode("utf-8") for arg in tool_args]
+              command = [sys.executable, "-m", "esp_idf_monitor"] + tool_args
+
+              if timeout is None:
+                  result = subprocess.run(command).returncode
+              else:
+                  # The monitor's scripting mode stops it after the sleep,
+                  # which lets it restore the terminal it may have changed.
+                  result = subprocess.run(
+                      command, input=f"sleep {timeout}\\nexit\\n", text=True
+                  ).returncode
+              """,
+              %{"tool_args" => tool_args, "timeout" => timeout}
+            )
+          catch
+            :error, %{__struct__: Pythonx.Error, __exception__: _} = e ->
+              {:error, {:pythonx_error, "Pythonx error occurred: #{inspect(e)}"}}
+          end) do
+      {_result, %{"result" => result}} ->
+        case Pythonx.decode(result) do
+          0 -> :ok
+          status -> {:error, {:idf_monitor, "The ESP-IDF monitor exited with status #{status}."}}
         end
 
       {:error, reason} ->

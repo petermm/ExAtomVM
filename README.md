@@ -21,7 +21,7 @@ To flash an ExAtomVM project to an ESP32, you will need:
 * An ESP32 development module such as the Espressif DevKit C
 * A USB cable to connect the ESP32 development module to your workstation
 * [esptool](https://github.com/espressif/esptool)
-* (Optional) A serial console program, such as `minicom`, or the `pythonx` dependency for `mix atomvm.esp32.monitor`
+* (Optional) A serial console program, such as `minicom`, or the `pythonx` dependency for the `mix atomvm.esp32.monitor` and `mix atomvm.esp32.idf_monitor` tasks
 
 Consult your local package manager for installation of these tools.
 
@@ -389,6 +389,34 @@ The task runs until Ctrl+C, pressed twice, or for the number of seconds given
 with `--timeout`, for scripts:
 
     shell$ mix atomvm.esp32.monitor --timeout 10
+
+### The `atomvm.esp32.idf_monitor` task
+
+The `atomvm.esp32.idf_monitor` task shows the console output of a connected
+ESP32 board with the
+[ESP-IDF monitor](https://github.com/espressif/esp-idf-monitor), which is
+installed in the Pythonx environment. It is like `atomvm.esp32.monitor`, and
+additionally decodes addresses and panic backtraces with an ELF file, adds
+timestamps, and filters output. It needs the optional `pythonx` dependency:
+
+    {:pythonx, "~> 0.4.0", runtime: false}
+
+The board is reset so that its output is shown from the boot messages on, and
+`--no-reset` leaves it running instead. `--port` and `--baud` are the same as
+for `atomvm.esp32.monitor`:
+
+    shell$ mix atomvm.esp32.idf_monitor
+    shell$ mix atomvm.esp32.idf_monitor --no-reset --port /dev/ttyACM0
+
+Arguments after `--` are passed to the ESP-IDF monitor, for example timestamps
+and the ELF file to decode addresses with:
+
+    shell$ mix atomvm.esp32.idf_monitor -- --timestamps build/atomvm.elf
+
+The task runs until the monitor is quit with Ctrl+], or for the number of
+seconds given with `--timeout`, for scripts:
+
+    shell$ mix atomvm.esp32.idf_monitor --timeout 10
 
 ### The `atomvm.esp32.expand` task
 
