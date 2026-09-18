@@ -3,7 +3,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.IdfMonitorTest do
 
   alias Mix.Tasks.Atomvm.Esp32.IdfMonitor
 
-  @usage "Usage: mix atomvm.esp32.idf_monitor [--port PORT] [--baud RATE] [--no-reset] [--timeout SECONDS] [-- ESP-IDF-MONITOR-OPTIONS]"
+  @usage "Usage: mix atomvm.esp32.idf_monitor [--port PORT] [--baud RATE] [--no-reset] [--exit-key KEY] [--timeout SECONDS] [-- ESP-IDF-MONITOR-OPTIONS]"
 
   test "rejects unknown options and values that are not numbers" do
     for args <- [
@@ -27,6 +27,14 @@ defmodule Mix.Tasks.Atomvm.Esp32.IdfMonitorTest do
     for timeout <- ["0", "-1"] do
       assert_raise Mix.Error, "--timeout must be a number of seconds greater than zero", fn ->
         IdfMonitor.run(["--timeout", timeout])
+      end
+    end
+  end
+
+  test "rejects an exit key the ESP-IDF monitor cannot use" do
+    for key <- ["", "CC", "1", "-", "]x"] do
+      assert_raise Mix.Error, "--exit-key must be a single letter, or one of [ ] \\ ^ _", fn ->
+        IdfMonitor.run(["--exit-key", key])
       end
     end
   end

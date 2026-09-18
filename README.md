@@ -408,13 +408,18 @@ for `atomvm.esp32.monitor`:
     shell$ mix atomvm.esp32.idf_monitor
     shell$ mix atomvm.esp32.idf_monitor --no-reset --port /dev/ttyACM0
 
+The monitor is quit with Ctrl+C, like `atomvm.esp32.monitor`. `--exit-key`
+picks another key, such as `Q` for Ctrl+Q:
+
+    shell$ mix atomvm.esp32.idf_monitor --exit-key Q
+
 Arguments after `--` are passed to the ESP-IDF monitor, for example timestamps
 and the ELF file to decode addresses with:
 
     shell$ mix atomvm.esp32.idf_monitor -- --timestamps build/atomvm.elf
 
-The task runs until the monitor is quit with Ctrl+], or for the number of
-seconds given with `--timeout`, for scripts:
+The task runs until the monitor is quit, or for the number of seconds given
+with `--timeout`, for scripts:
 
     shell$ mix atomvm.esp32.idf_monitor --timeout 10
 

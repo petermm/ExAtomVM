@@ -610,11 +610,12 @@ defmodule ExAtomVM.EsptoolHelper do
 
   The monitor is installed by `setup_idf_monitor/0`. Extra arguments for the
   monitor, such as the ELF files to decode addresses with, are passed in
-  `:args`.
+  `:args`. `:exit_key` is the key that quits the monitor.
   """
   def idf_monitor(port, baud, opts \\ []) do
     reset = Keyword.get(opts, :reset, true)
     timeout = Keyword.get(opts, :timeout)
+    exit_key = Keyword.get(opts, :exit_key)
     extra_args = Keyword.get(opts, :args, [])
 
     tool_args =
@@ -624,22 +625,48 @@ defmodule ExAtomVM.EsptoolHelper do
     case (try do
             Pythonx.eval(
               """
+              import os
               import subprocess
               import sys
+              import tempfile
 
               tool_args = [arg.decode("utf-8") for arg in tool_args]
+              env = os.environ.copy()
+              cfgfile = None
+
+              if exit_key is not None:
+                  # The monitor takes its keys from a config file, so the exit
+                  # key is set through a temporary one. It starts from the
+                  # configuration the monitor would read anyway, so the rest of
+                  # it is kept.
+                  from esp_idf_monitor.config import Config
+
+                  parser, _ = Config().load_configuration()
+                  if not parser.has_section("esp-idf-monitor"):
+                      parser.add_section("esp-idf-monitor")
+                  parser.set("esp-idf-monitor", "exit_key", exit_key.decode("utf-8"))
+
+                  fd, cfgfile = tempfile.mkstemp(prefix="atomvm-esp-idf-monitor-", suffix=".cfg")
+                  with os.fdopen(fd, "w") as file:
+                      parser.write(file)
+                  env["ESP_IDF_MONITOR_CFGFILE"] = cfgfile
+
               command = [sys.executable, "-m", "esp_idf_monitor"] + tool_args
 
-              if timeout is None:
-                  result = subprocess.run(command).returncode
-              else:
-                  # The monitor's scripting mode stops it after the sleep,
-                  # which lets it restore the terminal it may have changed.
-                  result = subprocess.run(
-                      command, input=f"sleep {timeout}\\nexit\\n", text=True
-                  ).returncode
+              try:
+                  if timeout is None:
+                      result = subprocess.run(command, env=env).returncode
+                  else:
+                      # The monitor's scripting mode stops it after the sleep,
+                      # which lets it restore the terminal it may have changed.
+                      result = subprocess.run(
+                          command, env=env, input=f"sleep {timeout}\\nexit\\n", text=True
+                      ).returncode
+              finally:
+                  if cfgfile is not None:
+                      os.remove(cfgfile)
               """,
-              %{"tool_args" => tool_args, "timeout" => timeout}
+              %{"tool_args" => tool_args, "timeout" => timeout, "exit_key" => exit_key}
             )
           catch
             :error, %{__struct__: Pythonx.Error, __exception__: _} = e ->
