@@ -128,8 +128,37 @@ defmodule ExAtomVM.Esp32BuildMatrixTest do
 
     assert message =~ "option(s) must be paths: :dir"
 
+    assert {:error, message} =
+             Esp32BuildMatrix.resolve([full: [chips: ["esp32"], cmake_args: 1]], :all)
+
+    assert message =~ "cmake_args must be a string or a list of strings"
+
+    assert {:error, message} =
+             Esp32BuildMatrix.resolve([full: [chips: ["esp32"], cmake_args: [:x]]], :all)
+
+    assert message =~ "cmake_args must be strings: [:x]"
+
     assert {:error, message} = Esp32BuildMatrix.resolve([full: "esp32"], :all)
     assert message =~ "options must be a keyword list or map"
+  end
+
+  test "resolves cmake_args as a string or a list", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      config = [
+        one: [
+          chips: ["esp32"],
+          cmake_args: "-DAVM_USE_LIBSODIUM=ON -DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"
+        ],
+        two: [chips: ["esp32"], cmake_args: ["-DX=1"]],
+        three: [chips: ["esp32"]]
+      ]
+
+      assert {:ok, [one, two, three]} = Esp32BuildMatrix.resolve(config, :all)
+
+      assert one.cmake_args == ["-DAVM_USE_LIBSODIUM=ON", "-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"]
+      assert two.cmake_args == ["-DX=1"]
+      assert three.cmake_args == []
+    end)
   end
 
   test "reports a broken input with the build name" do

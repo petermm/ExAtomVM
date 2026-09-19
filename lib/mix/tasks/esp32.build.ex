@@ -67,10 +67,13 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
 
   Explicit `dir`, `components`, `lock`, `sdkconfig`, and `partitions` options
   override the convention, and a missing file means no customization on that
-  axis. Inputs are staged into the AtomVM checkout for the build and restored
-  afterwards; matrix builds always start from a clean ESP32 build directory.
-  Each image is written as `atomvm-<build>-<chip>-elixir.img`, and `--chip`
-  overrides the chips of every selected build.
+  axis. `cmake_args` passes extra arguments to `idf.py`, as a list of strings
+  or a single string, for example
+  `["-DAVM_USE_LIBSODIUM=ON", "-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"]`. Inputs
+  are staged into the AtomVM checkout for the build and restored afterwards;
+  matrix builds always start from a clean ESP32 build directory. Each image is
+  written as `atomvm-<build>-<chip>-elixir.img`, and `--chip` overrides the
+  chips of every selected build.
 
   ## Examples
 
@@ -216,12 +219,14 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
         [
           "  #{plan.name}: #{Enum.join(plan.chips, ", ")}",
           "    directory: #{plan.dir}",
+          plan.cmake_args != [] && "    cmake_args: #{Enum.join(plan.cmake_args, " ")}",
           plan.components && "    components: #{plan.components}",
           plan.sdkconfig && "    sdkconfig: #{plan.sdkconfig}",
           plan.partition_table && "    partitions: #{plan.partition_table}",
           Enum.map(plan.images, &"    image: #{&1}")
         ]
-        |> Enum.reject(&is_nil/1)
+        |> List.flatten()
+        |> Enum.reject(&(&1 in [nil, false]))
         |> Enum.join("\n")
       end)
 
@@ -276,6 +281,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
       name: nil,
       dir: nil,
       chips: parse_chips(Keyword.get(opts, :chip, @default_chip)),
+      cmake_args: [],
       components: components,
       sdkconfig: Keyword.get(opts, :sdkconfig),
       partition_table: partition_table
@@ -609,7 +615,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
               atomvm_path,
               platform_dir,
               idf_path,
-              idf_set_target_args(chip)
+              idf_set_target_args(chip, build.cmake_args)
             )
 
           case status do
@@ -623,7 +629,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
                   atomvm_path,
                   platform_dir,
                   idf_path,
-                  idf_build_args()
+                  idf_build_args(build.cmake_args)
                 )
 
               case build_status do
@@ -647,12 +653,12 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     end)
   end
 
-  defp idf_set_target_args(chip) do
-    [@elixir_cmake_arg, "set-target", chip]
+  defp idf_set_target_args(chip, cmake_args) do
+    [@elixir_cmake_arg] ++ cmake_args ++ ["set-target", chip]
   end
 
-  defp idf_build_args do
-    [@elixir_cmake_arg, "build"]
+  defp idf_build_args(cmake_args) do
+    [@elixir_cmake_arg] ++ cmake_args ++ ["build"]
   end
 
   defp run_idf_command(true, idf_version, atomvm_path, platform_dir, _idf_path, idf_args) do

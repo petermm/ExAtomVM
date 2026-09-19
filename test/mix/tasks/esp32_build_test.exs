@@ -246,14 +246,17 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
   test "--list-matrix prints the resolved builds", %{tmp_dir: tmp_dir} do
     File.cd!(tmp_dir, fn ->
       write_entry("full", "dependencies: {}\n", "nvs, data, nvs, 0x9000, 0x6000,\n")
-      put_matrix(full: [chips: ["esp32p4"]])
+      put_matrix(full: [chips: ["esp32p4", "esp32c3"], cmake_args: ["-DAVM_USE_LIBSODIUM=ON"]])
 
       output = capture_io(fn -> Build.run(["--list-matrix"]) end)
 
       assert output =~ "Build matrix (1 build(s))"
-      assert output =~ "full: esp32p4"
+      assert output =~ "full: esp32p4, esp32c3"
+      assert output =~ "cmake_args: -DAVM_USE_LIBSODIUM=ON"
       assert output =~ "atomvm_builder/full"
-      assert output =~ "atomvm-full-esp32p4-elixir.img"
+      assert output =~ "    image: _build/atomvm_images/atomvm-full-esp32p4-elixir.img\n"
+      assert output =~ "    image: _build/atomvm_images/atomvm-full-esp32c3-elixir.img\n"
+      refute output =~ "false"
     end)
   end
 
@@ -363,6 +366,40 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
       assert File.read!(Path.join(capture_dir, "partitions-2")) == "two partitions\n"
       refute File.exists?(manifest_path)
       refute File.exists?(partitions_path)
+    end)
+  end
+
+  test "--matrix passes cmake_args to idf.py", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      atomvm_path = fake_atomvm_tree(tmp_dir)
+      args_file = Path.join(tmp_dir, "args")
+      idf_path = Path.join(tmp_dir, "idf.py")
+
+      put_matrix(one: [chips: ["esp32p4"], cmake_args: ["-DAVM_USE_LIBSODIUM=ON"]])
+
+      write_idf_script(idf_path, """
+      echo "$@" > "#{args_file}"
+      exit 1
+      """)
+
+      capture_io(fn ->
+        assert catch_exit(
+                 Build.run([
+                   "--atomvm-path",
+                   atomvm_path,
+                   "--idf-path",
+                   idf_path,
+                   "--matrix",
+                   "one"
+                 ])
+               ) == {:shutdown, 1}
+      end)
+
+      args = File.read!(args_file)
+      assert args =~ "-DATOMVM_ELIXIR_SUPPORT=on"
+      assert args =~ "-DAVM_USE_LIBSODIUM=ON"
+      assert args =~ "set-target"
+      assert args =~ "esp32p4"
     end)
   end
 

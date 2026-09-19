@@ -25,7 +25,7 @@ defmodule ExAtomVM.Esp32BuildMatrix do
   @component_manifest "idf_component.yml"
   @sdkconfig_defaults "sdkconfig.defaults"
   @custom_partitions "custom_partitions.csv"
-  @entry_keys [:chips, :dir, :components, :lock, :sdkconfig, :partitions]
+  @entry_keys [:chips, :dir, :components, :lock, :sdkconfig, :partitions, :cmake_args]
   @path_keys [:dir, :components, :lock, :sdkconfig, :partitions]
   @chip_format ~r/^esp32[a-z0-9]*$/
 
@@ -61,6 +61,7 @@ defmodule ExAtomVM.Esp32BuildMatrix do
         name: build.name,
         chips: build.chips,
         dir: Path.relative_to_cwd(build.dir),
+        cmake_args: build.cmake_args,
         components: build.components && Path.relative_to_cwd(build.components.path),
         sdkconfig: build.sdkconfig && Path.relative_to_cwd(build.sdkconfig),
         partition_table:
@@ -170,8 +171,9 @@ defmodule ExAtomVM.Esp32BuildMatrix do
   defp entry_options({name, opts}) do
     with {:ok, options} <- options_map(name, opts),
          :ok <- reject_unknown_keys(name, options),
-         {:ok, chips} <- entry_chips(name, options) do
-      {:ok, %{name: name, options: options, chips: chips}}
+         {:ok, chips} <- entry_chips(name, options),
+         {:ok, cmake_args} <- entry_cmake_args(name, options) do
+      {:ok, %{name: name, options: options, chips: chips, cmake_args: cmake_args}}
     end
   end
 
@@ -248,7 +250,23 @@ defmodule ExAtomVM.Esp32BuildMatrix do
     end
   end
 
-  defp resolve_entry(%{name: name, options: options, chips: chips}) do
+  defp entry_cmake_args(name, options) do
+    case Map.get(options, :cmake_args, []) do
+      args when is_binary(args) ->
+        {:ok, String.split(args)}
+
+      args when is_list(args) ->
+        case Enum.reject(args, &(is_binary(&1) and &1 != "")) do
+          [] -> {:ok, args}
+          invalid -> {:error, "build #{name} cmake_args must be strings: #{inspect(invalid)}"}
+        end
+
+      _other ->
+        {:error, "build #{name} cmake_args must be a string or a list of strings"}
+    end
+  end
+
+  defp resolve_entry(%{name: name, options: options, chips: chips, cmake_args: cmake_args}) do
     dir = Path.expand(Map.get(options, :dir) || Path.join(@builds_dir, name))
 
     with {:ok, components} <- load_components(name, options, dir),
@@ -259,6 +277,7 @@ defmodule ExAtomVM.Esp32BuildMatrix do
          name: name,
          dir: dir,
          chips: chips,
+         cmake_args: cmake_args,
          components: components,
          sdkconfig: sdkconfig,
          partition_table: partition_table

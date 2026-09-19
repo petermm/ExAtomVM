@@ -416,7 +416,7 @@ atomvm_builder/full/
   custom_partitions.csv       # used as the partition table
 ```
 
-A missing file means no customization on that axis, and `dir`, `components`, `lock`, `sdkconfig`, and `partitions` select different paths. All inputs are read once before anything is cloned or built, then staged into the AtomVM checkout only while the build runs and restored afterwards. Matrix builds always start from a clean ESP32 build directory, since their inputs differ by definition.
+A missing file means no customization on that axis, and `dir`, `components`, `lock`, `sdkconfig`, and `partitions` select different paths. `cmake_args` passes extra arguments to `idf.py`, as a list of strings or a single string, for example `["-DAVM_USE_LIBSODIUM=ON", "-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"]`. All inputs are read once before anything is cloned or built, then staged into the AtomVM checkout only while the build runs and restored afterwards. Matrix builds always start from a clean ESP32 build directory, since their inputs differ by definition.
 
 ```shell
 shell$ mix atomvm.esp32.build --matrix full           # one build
