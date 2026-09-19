@@ -34,11 +34,40 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     * `--mbedtls-prefix` - Path to custom MbedTLS installation (optional, falls back to MBEDTLS_PREFIX env var)
     * `--partition-table` - Path to custom partition table CSV file (optional, defaults to custom_partitions.csv if present)
     * `--sdkconfig` - Path to custom sdkconfig.defaults file (optional, defaults to sdkconfig.defaults if present)
+    * `--matrix` - Build(s) from the `atomvm_builder` configuration: a name, comma-separated names, or `all`
+    * `--list-matrix` - Resolve the configured builds, print them, and exit without building
+    * `--format` - With `--list-matrix`, `text` (default) or `json`
+    * `--output` - With `--list-matrix`, write the plan to this file instead of stdout
 
   If `--partition-table` is provided, or if your Mix project root contains `custom_partitions.csv`,
   it will be used as the ESP32 partition table for the build. ExAtomVM passes the contents
   through unchanged, without imposing partition names, types, offsets, or sizes. The selected
   file must be readable, non-empty, and regular; AtomVM and ESP-IDF handle its contents.
+
+  ## Build matrix
+
+  `--matrix` builds named ESP32 builds declared in `mix.exs` under
+  `atomvm_builder`. Each build has its own chips and, in a directory named after
+  it, its own component manifest, sdkconfig defaults, and partition table:
+
+      atomvm_builder: [
+        plain: [chips: ["esp32"]],
+        full: [chips: ["esp32s3"]]
+      ]
+
+      atomvm_builder/full/
+        idf_component.yml
+        dependencies.lock
+        sdkconfig.defaults
+        sdkconfig.defaults.esp32s3
+        custom_partitions.csv
+
+  Explicit `dir`, `components`, `lock`, `sdkconfig`, and `partitions` options
+  override the convention, and a missing file means no customization on that
+  axis. Inputs are staged into the AtomVM checkout for the build and restored
+  afterwards; matrix builds always start from a clean ESP32 build directory.
+  Each image is written as `atomvm-<build>-<chip>-elixir.img`, and `--chip`
+  overrides the chips of every selected build.
 
   ## Examples
 
@@ -78,8 +107,18 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
       # Build for multiple chips
       mix atomvm.esp32.build --chip esp32,esp32s3,esp32c6
 
+      # Build one configured build, several, or every one of them
+      mix atomvm.esp32.build --matrix full
+      mix atomvm.esp32.build --matrix full,cam
+      mix atomvm.esp32.build --matrix all
+
+      # Show the resolved builds, or emit a CI matrix
+      mix atomvm.esp32.build --list-matrix
+      mix atomvm.esp32.build --list-matrix --format json --output matrix.json
+
   """
   use Mix.Task
+  alias ExAtomVM.Esp32BuildMatrix
   alias ExAtomVM.Esp32BuildStaging
   alias ExAtomVM.Esp32CustomComponents
   alias ExAtomVM.Esp32CustomPartitions
@@ -108,164 +147,332 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
           clean: :boolean,
           mbedtls_prefix: :string,
           partition_table: :string,
-          sdkconfig: :string
+          sdkconfig: :string,
+          matrix: :string,
+          list_matrix: :boolean,
+          format: :string,
+          output: :string
         ]
       )
 
-    atomvm_path = Keyword.get(opts, :atomvm_path)
-    atomvm_url = Keyword.get(opts, :atomvm_url, @default_atomvm_url)
-    ref = Keyword.get(opts, :ref, @default_ref)
-    idf_path = Keyword.get(opts, :idf_path, @default_idf_path)
-    use_docker = Keyword.get(opts, :use_docker, false)
-    idf_version = Keyword.get(opts, :idf_version, @default_idf_version)
-    clean = Keyword.get(opts, :clean, false)
-    sdkconfig = Keyword.get(opts, :sdkconfig)
+    if not Keyword.get(opts, :list_matrix, false) and
+         (Keyword.has_key?(opts, :format) or Keyword.has_key?(opts, :output)) do
+      error_exit("--format and --output only apply to --list-matrix")
+    end
 
+    cond do
+      Keyword.get(opts, :list_matrix, false) ->
+        list_matrix(opts)
+
+      matrix = Keyword.get(opts, :matrix) ->
+        execute(builds_for_matrix(matrix, opts), opts)
+
+      true ->
+        execute([legacy_build(opts)], opts)
+    end
+  end
+
+  # Resolves and prints the configured builds instead of building them.
+  defp list_matrix(opts) do
+    if Keyword.has_key?(opts, :partition_table) or Keyword.has_key?(opts, :sdkconfig) do
+      error_exit("--partition-table and --sdkconfig cannot be combined with --list-matrix")
+    end
+
+    selection =
+      case Keyword.get(opts, :matrix) do
+        nil -> :all
+        names -> parse_selection(names)
+      end
+
+    case Esp32BuildMatrix.resolve(Esp32BuildMatrix.config(), selection) do
+      {:ok, builds} ->
+        plan = render_plan(builds, Keyword.get(opts, :format, "text"))
+
+        case Keyword.get(opts, :output) do
+          nil -> IO.write(plan)
+          path -> write_plan(path, plan)
+        end
+
+      {:error, reason} ->
+        error_exit(reason)
+    end
+  end
+
+  defp render_plan(builds, "text"), do: plan_text(builds)
+  defp render_plan(builds, "json"), do: Esp32BuildMatrix.to_json(builds) <> "\n"
+
+  defp render_plan(_builds, format) do
+    error_exit("unknown --format #{inspect(format)}; use text or json")
+  end
+
+  defp plan_text(builds) do
+    plans = Esp32BuildMatrix.plan(builds)
+
+    body =
+      Enum.map_join(plans, "\n", fn plan ->
+        [
+          "  #{plan.name}: #{Enum.join(plan.chips, ", ")}",
+          "    directory: #{plan.dir}",
+          plan.components && "    components: #{plan.components}",
+          plan.sdkconfig && "    sdkconfig: #{plan.sdkconfig}",
+          plan.partition_table && "    partitions: #{plan.partition_table}",
+          Enum.map(plan.images, &"    image: #{&1}")
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n")
+      end)
+
+    "Build matrix (#{length(plans)} build(s))\n\n" <> body <> "\n"
+  end
+
+  defp write_plan(path, content) do
+    path = Path.expand(path)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, content)
+    IO.puts("Wrote #{Path.relative_to_cwd(path)}")
+  end
+
+  # Matrix builds are resolved before anything is cloned or built, so a broken
+  # configuration fails fast.
+  defp builds_for_matrix(selection, opts) do
+    if Keyword.has_key?(opts, :partition_table) or Keyword.has_key?(opts, :sdkconfig) do
+      error_exit(
+        "--partition-table and --sdkconfig cannot be combined with --matrix; " <>
+          "configure them per build in atomvm_builder"
+      )
+    end
+
+    builds =
+      case Esp32BuildMatrix.resolve(Esp32BuildMatrix.config(), parse_selection(selection)) do
+        {:ok, builds} -> builds
+        {:error, reason} -> error_exit(reason)
+      end
+
+    case Keyword.get(opts, :chip) do
+      nil -> builds
+      chip -> Enum.map(builds, &%{&1 | chips: parse_chips(chip)})
+    end
+  end
+
+  # Without --matrix there is one implicit build, configured from the project
+  # root like before.
+  defp legacy_build(opts) do
     partition_table =
       case Esp32CustomPartitions.load_custom_partitions(Keyword.get(opts, :partition_table)) do
-        {:ok, selected} ->
-          selected
-
-        {:error, reason} ->
-          IO.puts("Error: #{reason}")
-          exit({:shutdown, 1})
+        {:ok, selected} -> selected
+        {:error, reason} -> error_exit(reason)
       end
 
     components =
       case Esp32CustomComponents.load_custom_components(nil) do
-        {:ok, selected} ->
-          selected
-
-        {:error, reason} ->
-          IO.puts("Error: #{reason}")
-          exit({:shutdown, 1})
+        {:ok, selected} -> selected
+        {:error, reason} -> error_exit(reason)
       end
 
-    chips =
-      opts
-      |> Keyword.get(:chip, @default_chip)
-      |> String.split(",", trim: true)
-      |> Enum.map(&String.trim/1)
+    %{
+      name: nil,
+      dir: nil,
+      chips: parse_chips(Keyword.get(opts, :chip, @default_chip)),
+      components: components,
+      sdkconfig: Keyword.get(opts, :sdkconfig),
+      partition_table: partition_table
+    }
+  end
 
-    # Get mbedtls_prefix from option or environment variable
-    mbedtls_prefix =
-      Keyword.get(opts, :mbedtls_prefix) || System.get_env("MBEDTLS_PREFIX")
+  defp parse_selection(value) do
+    case value |> String.split(",", trim: true) |> Enum.map(&String.trim/1) do
+      [] -> :all
+      ["all"] -> :all
+      names -> names
+    end
+  end
+
+  defp parse_chips(value) do
+    value |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+  end
+
+  defp execute(builds, opts) do
+    idf_path = Keyword.get(opts, :idf_path, @default_idf_path)
+    use_docker = Keyword.get(opts, :use_docker, false)
+    idf_version = Keyword.get(opts, :idf_version, @default_idf_version)
+    clean = Keyword.get(opts, :clean, false)
+    mbedtls_prefix = Keyword.get(opts, :mbedtls_prefix) || System.get_env("MBEDTLS_PREFIX")
+    matrix? = Enum.any?(builds, &(&1.name != nil))
 
     # Use --atomvm-path, --atomvm-url, or default to AtomVM/AtomVM main branch.
     # Expand to an absolute path so Docker bind mounts (`-v <host>:/project`)
     # and any later relative-path math work consistently.
     atomvm_path =
-      cond do
+      case Keyword.get(opts, :atomvm_path) do
+        nil ->
+          ExAtomVM.AtomVMBuilder.clone_or_update_repo(
+            Keyword.get(opts, :atomvm_url, @default_atomvm_url),
+            Keyword.get(opts, :ref, @default_ref)
+          )
+
         atomvm_path ->
           atomvm_path
-
-        true ->
-          ExAtomVM.AtomVMBuilder.clone_or_update_repo(atomvm_url, ref)
       end
       |> Path.expand()
 
     # Verify AtomVM path exists
     unless File.dir?(atomvm_path) do
-      IO.puts("Error: AtomVM path does not exist: #{atomvm_path}")
-      exit({:shutdown, 1})
+      error_exit("AtomVM path does not exist: #{atomvm_path}")
     end
 
-    chips_label = Enum.join(chips, ", ")
+    IO.puts(banner(builds, atomvm_path, clean, matrix?))
 
-    IO.puts("""
-
-    Building AtomVM from source
-    Repository: #{atomvm_path}
-    Chip(s): #{chips_label}
-    Clean build: #{clean}
-
-    """)
-
-    # Validate sdkconfig options for all target chips
-    validation_result =
-      Enum.reduce_while(chips, :ok, fn chip, :ok ->
-        case validate_sdkconfigs(sdkconfig, chip) do
-          :ok -> {:cont, :ok}
-          {:error, reason} -> {:halt, {:error, reason}}
-        end
-      end)
-
-    with :ok <- validation_result,
+    with :ok <- validate_builds(builds),
          :ok <- check_esp_idf(idf_path, use_docker, idf_version),
          :ok <- check_escript(),
          :ok <- ExAtomVM.AtomVMBuilder.build_generic_unix(atomvm_path, mbedtls_prefix, clean) do
-      if is_nil(components), do: offer_component_example()
-
-      custom_partitions? = not is_nil(partition_table)
-
-      if custom_partitions? and not clean do
-        filename = Path.basename(partition_table.path)
-
-        IO.puts(
-          "#{filename} detected; forcing clean ESP32 platform build so partition metadata is regenerated..."
-        )
-      end
+      if not matrix? and is_nil(hd(builds).components), do: offer_component_example()
 
       results =
-        chips
-        |> Enum.with_index(1)
-        |> Enum.map(fn {chip, index} ->
-          if length(chips) > 1 do
-            IO.puts("\n━━━ Building chip #{index}/#{length(chips)}: #{chip} ━━━\n")
-          end
-
-          sdkconfig_paths = custom_sdkconfig_paths(sdkconfig, chip)
-          custom_sdkconfig? = match?({:ok, _}, sdkconfig_paths)
-
-          if custom_sdkconfig? and not clean do
-            case sdkconfig_paths do
-              {:ok, {base, chip_spec}} ->
-                files =
-                  Enum.filter([base, chip_spec], & &1)
-                  |> Enum.map(&Path.basename/1)
-                  |> Enum.join(" and ")
-
-                IO.puts(
-                  "Custom sdkconfig (#{files}) detected; forcing clean ESP32 platform build so configurations are regenerated..."
-                )
-
-              _ ->
-                :ok
-            end
-          end
-
-          force_clean = clean or index > 1 or custom_partitions? or custom_sdkconfig?
-
-          case build_atomvm(
-                 atomvm_path,
-                 chip,
-                 idf_path,
-                 idf_version,
-                 use_docker,
-                 force_clean,
-                 partition_table,
-                 sdkconfig,
-                 components
-               ) do
-            {:ok, src_img} ->
-              img = save_image(src_img)
-              {chip, :ok, img}
-
-            {:error, reason} ->
-              {chip, :error, reason}
-          end
+        Enum.flat_map(builds, fn build ->
+          build.chips
+          |> Enum.with_index(1)
+          |> Enum.map(fn {chip, index} ->
+            build_chip(
+              build,
+              chip,
+              index,
+              atomvm_path,
+              idf_path,
+              idf_version,
+              use_docker,
+              clean,
+              matrix?
+            )
+          end)
         end)
 
       print_summary(results)
 
-      if Enum.any?(results, fn {_, status, _} -> status == :error end) do
+      if Enum.any?(results, fn {_name, _chip, status, _detail} -> status == :error end) do
         exit({:shutdown, 1})
       end
     else
       {:error, reason} ->
-        IO.puts("Error: #{reason}")
-        exit({:shutdown, 1})
+        error_exit(reason)
     end
+  end
+
+  defp banner(builds, atomvm_path, _clean, true) do
+    builds_label = Enum.map_join(builds, ", ", &"#{&1.name} (#{Enum.join(&1.chips, ", ")})")
+
+    """
+
+    Building AtomVM from source
+    Repository: #{atomvm_path}
+    Build(s): #{builds_label}
+    Clean build: always (each build stages its own inputs)
+
+    """
+  end
+
+  defp banner([build], atomvm_path, clean, false) do
+    """
+
+    Building AtomVM from source
+    Repository: #{atomvm_path}
+    Chip(s): #{Enum.join(build.chips, ", ")}
+    Clean build: #{clean}
+
+    """
+  end
+
+  defp build_chip(
+         build,
+         chip,
+         index,
+         atomvm_path,
+         idf_path,
+         idf_version,
+         use_docker,
+         clean,
+         matrix?
+       ) do
+    total = length(build.chips)
+
+    cond do
+      matrix? ->
+        IO.puts("\n━━━ Building #{build.name}: #{chip} (#{index}/#{total}) ━━━\n")
+
+      total > 1 ->
+        IO.puts("\n━━━ Building chip #{index}/#{total}: #{chip} ━━━\n")
+
+      true ->
+        :ok
+    end
+
+    custom_sdkconfig? = match?({:ok, _}, custom_sdkconfig_paths(build.sdkconfig, chip))
+
+    if not matrix? and not clean do
+      warn_forced_clean(build, chip, custom_sdkconfig?)
+    end
+
+    force_clean =
+      clean or matrix? or index > 1 or not is_nil(build.partition_table) or custom_sdkconfig?
+
+    case build_atomvm(atomvm_path, chip, idf_path, idf_version, use_docker, force_clean, build) do
+      {:ok, src_img} -> {build.name, chip, :ok, save_image(src_img)}
+      {:error, reason} -> {build.name, chip, :error, reason}
+    end
+  end
+
+  defp warn_forced_clean(build, chip, custom_sdkconfig?) do
+    if build.partition_table do
+      filename = Path.basename(build.partition_table.path)
+
+      IO.puts(
+        "#{filename} detected; forcing clean ESP32 platform build so partition metadata is regenerated..."
+      )
+    end
+
+    if custom_sdkconfig? do
+      case custom_sdkconfig_paths(build.sdkconfig, chip) do
+        {:ok, {base, chip_spec}} ->
+          files =
+            [base, chip_spec]
+            |> Enum.filter(& &1)
+            |> Enum.map(&Path.basename/1)
+            |> Enum.join(" and ")
+
+          IO.puts(
+            "Custom sdkconfig (#{files}) detected; forcing clean ESP32 platform build so configurations are regenerated..."
+          )
+
+        _ ->
+          :ok
+      end
+    end
+  end
+
+  defp validate_builds(builds) do
+    Enum.reduce_while(builds, :ok, fn build, :ok ->
+      case validate_build_sdkconfigs(build) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp validate_build_sdkconfigs(build) do
+    Enum.reduce_while(build.chips, :ok, fn chip, :ok ->
+      case validate_sdkconfigs(build.sdkconfig, chip) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, build_error(build, reason)}}
+      end
+    end)
+  end
+
+  defp build_error(%{name: nil}, reason), do: reason
+  defp build_error(%{name: name}, reason), do: "#{name}: #{reason}"
+
+  defp error_exit(reason) do
+    IO.puts("Error: #{reason}")
+    exit({:shutdown, 1})
   end
 
   defp print_summary(results) do
@@ -274,30 +481,37 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     cwd = File.cwd!()
 
     Enum.each(results, fn
-      {chip, :ok, img} ->
+      {name, chip, :ok, img} ->
+        label = summary_label(name, chip)
+
         if File.exists?(img) do
-          IO.puts("  ✅ #{chip}: #{img}")
+          IO.puts("  ✅ #{label}: #{img}")
         else
-          IO.puts("  ⚠️  #{chip}: built but image not found at #{img}")
+          IO.puts("  ⚠️  #{label}: built but image not found at #{img}")
         end
 
-      {chip, :error, reason} ->
-        IO.puts("  ❌ #{chip}: #{reason}")
+      {name, chip, :error, reason} ->
+        IO.puts("  ❌ #{summary_label(name, chip)}: #{reason}")
     end)
 
     successful =
-      Enum.filter(results, fn {_, status, img} -> status == :ok and File.exists?(img) end)
+      Enum.filter(results, fn {_name, _chip, status, img} ->
+        status == :ok and File.exists?(img)
+      end)
 
     if successful != [] do
       IO.puts("\nTo flash a specific image:")
 
-      Enum.each(successful, fn {_chip, _, img} ->
+      Enum.each(successful, fn {_name, _chip, _status, img} ->
         IO.puts("  mix atomvm.esp32.install --image #{relative_path(img, cwd)}")
       end)
     end
 
     IO.puts("")
   end
+
+  defp summary_label(nil, chip), do: chip
+  defp summary_label(name, chip), do: "#{name} (#{chip})"
 
   defp relative_path(path, cwd) do
     Path.relative_to(path, cwd, force: true)
@@ -371,23 +585,13 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     end
   end
 
-  defp build_atomvm(
-         atomvm_path,
-         chip,
-         idf_path,
-         idf_version,
-         use_docker,
-         clean,
-         partition_table,
-         sdkconfig,
-         components
-       ) do
+  defp build_atomvm(atomvm_path, chip, idf_path, idf_version, use_docker, clean, build) do
     build_dir = Path.join([atomvm_path, "src", "platforms", "esp32", "build"])
     platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
 
-    Esp32CustomPartitions.with_custom_partitions(platform_dir, partition_table, fn ->
-      with_staged_sdkconfig(platform_dir, chip, sdkconfig, fn ->
-        Esp32CustomComponents.with_custom_components(platform_dir, components, fn ->
+    Esp32CustomPartitions.with_custom_partitions(platform_dir, build.partition_table, fn ->
+      with_staged_sdkconfig(platform_dir, chip, build.sdkconfig, fn ->
+        Esp32CustomComponents.with_custom_components(platform_dir, build.components, fn ->
           if clean and File.dir?(build_dir) do
             IO.puts("Cleaning build directory...")
             ExAtomVM.AtomVMBuilder.clean_dir(build_dir)
@@ -424,8 +628,8 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
                   create_flashable_image(
                     Path.expand(atomvm_path),
                     Path.expand(build_dir),
-                    chip,
-                    use_docker
+                    use_docker,
+                    Esp32BuildMatrix.image_stem(build.name, chip)
                   )
 
                 _status ->
@@ -474,10 +678,10 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     )
   end
 
-  defp create_flashable_image(atomvm_path, build_dir, chip, use_docker) do
+  defp create_flashable_image(atomvm_path, build_dir, use_docker, stem) do
     mkimage_erl = Path.join(build_dir, "mkimage.erl")
     mkimage_config = Path.join(build_dir, "mkimage.config")
-    output_img = Path.join(build_dir, "atomvm-#{chip}-elixir.img")
+    output_img = Path.join(build_dir, "#{stem}.img")
 
     cond do
       not File.exists?(mkimage_erl) ->

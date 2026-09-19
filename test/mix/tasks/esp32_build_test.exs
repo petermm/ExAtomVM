@@ -243,6 +243,141 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
     end)
   end
 
+  test "--list-matrix prints the resolved builds", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      write_entry("full", "dependencies: {}\n", "nvs, data, nvs, 0x9000, 0x6000,\n")
+      put_matrix(full: [chips: ["esp32p4"]])
+
+      output = capture_io(fn -> Build.run(["--list-matrix"]) end)
+
+      assert output =~ "Build matrix (1 build(s))"
+      assert output =~ "full: esp32p4"
+      assert output =~ "atomvm_builder/full"
+      assert output =~ "atomvm-full-esp32p4-elixir.img"
+    end)
+  end
+
+  test "--list-matrix --format json emits a CI matrix", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      put_matrix(one: [chips: ["esp32"]], two: [chips: ["esp32s3"]])
+
+      output = capture_io(fn -> Build.run(["--list-matrix", "--format", "json"]) end)
+
+      assert %{"include" => include} = :json.decode(output)
+      assert Enum.map(include, & &1["name"]) == ["one", "two"]
+      assert Enum.map(include, & &1["chip"]) == ["esp32", "esp32s3"]
+    end)
+  end
+
+  test "--list-matrix --output writes the plan to a file", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      put_matrix(one: [chips: ["esp32"]])
+
+      capture_io(fn ->
+        Build.run(["--list-matrix", "--format", "json", "--output", "ci/matrix.json"])
+      end)
+
+      assert %{"include" => [%{"name" => "one"}]} =
+               "ci/matrix.json" |> File.read!() |> :json.decode()
+    end)
+  end
+
+  test "--matrix reports an unknown build", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      put_matrix(one: [chips: ["esp32"]])
+
+      output =
+        capture_io(fn ->
+          assert catch_exit(Build.run(["--matrix", "two"])) == {:shutdown, 1}
+        end)
+
+      assert output =~ "unknown build(s): two"
+    end)
+  end
+
+  test "matrix and listing options are refused where they do not apply", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      put_matrix(one: [chips: ["esp32"]])
+
+      output =
+        capture_io(fn ->
+          assert catch_exit(Build.run(["--format", "json"])) == {:shutdown, 1}
+        end)
+
+      assert output =~ "--format and --output only apply to --list-matrix"
+
+      output =
+        capture_io(fn ->
+          assert catch_exit(Build.run(["--matrix", "one", "--sdkconfig", "custom.defaults"])) ==
+                   {:shutdown, 1}
+        end)
+
+      assert output =~ "--sdkconfig cannot be combined with --matrix"
+    end)
+  end
+
+  test "--matrix builds each entry with its own inputs and restores the checkout",
+       %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      atomvm_path = fake_atomvm_tree(tmp_dir)
+      platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
+      manifest_path = Path.join([platform_dir, "main", "idf_component.yml"])
+      partitions_path = Path.join(platform_dir, "partitions-elixir.csv")
+      capture_dir = Path.join(tmp_dir, "captured")
+      File.mkdir_p!(capture_dir)
+
+      write_entry("one", "one manifest\n", "one partitions\n")
+      write_entry("two", "two manifest\n", "two partitions\n")
+      put_matrix(one: [chips: ["esp32p4"]], two: [chips: ["esp32p4"]])
+
+      idf_path = Path.join(tmp_dir, "idf.py")
+
+      write_idf_script(idf_path, """
+      n=$(cat "#{capture_dir}/count" 2>/dev/null || echo 0)
+      n=$((n+1))
+      echo $n > "#{capture_dir}/count"
+      cp main/idf_component.yml "#{capture_dir}/manifest-$n"
+      cp partitions-elixir.csv "#{capture_dir}/partitions-$n"
+      exit 1
+      """)
+
+      output =
+        capture_io(fn ->
+          assert catch_exit(
+                   Build.run([
+                     "--atomvm-path",
+                     atomvm_path,
+                     "--idf-path",
+                     idf_path,
+                     "--matrix",
+                     "all"
+                   ])
+                 ) == {:shutdown, 1}
+        end)
+
+      assert output =~ "one (esp32p4)"
+      assert output =~ "two (esp32p4)"
+      assert File.read!(Path.join(capture_dir, "manifest-1")) == "one manifest\n"
+      assert File.read!(Path.join(capture_dir, "partitions-1")) == "one partitions\n"
+      assert File.read!(Path.join(capture_dir, "manifest-2")) == "two manifest\n"
+      assert File.read!(Path.join(capture_dir, "partitions-2")) == "two partitions\n"
+      refute File.exists?(manifest_path)
+      refute File.exists?(partitions_path)
+    end)
+  end
+
+  defp put_matrix(config) do
+    Application.put_env(:exatomvm, :atomvm_builder, config)
+    on_exit(fn -> Application.delete_env(:exatomvm, :atomvm_builder) end)
+  end
+
+  defp write_entry(name, manifest, partitions) do
+    dir = Path.join("atomvm_builder", name)
+    File.mkdir_p!(dir)
+    File.write!(Path.join(dir, "idf_component.yml"), manifest)
+    File.write!(Path.join(dir, "custom_partitions.csv"), partitions)
+  end
+
   defp fake_atomvm_tree(tmp_dir) do
     atomvm_path = Path.join(tmp_dir, "AtomVM")
     platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])

@@ -338,6 +338,10 @@ If no AtomVM source is supplied, the task clones the AtomVM `main` branch automa
 | `--mbedtls-prefix` | - | Path to a custom MbedTLS installation (falls back to the `MBEDTLS_PREFIX` env var) |
 | `--partition-table` | - | Path to custom partition table CSV file (falls back to `custom_partitions.csv` in project root) |
 | `--sdkconfig` | - | Path to custom `sdkconfig.defaults` file (falls back to `sdkconfig.defaults` in project root) |
+| `--matrix` | - | Build(s) from the `atomvm_builder` configuration: a name, comma-separated names, or `all` |
+| `--list-matrix` | `false` | Resolve the configured builds, print them, and exit without building |
+| `--format` | `text` | With `--list-matrix`, `text` or `json` |
+| `--output` | - | With `--list-matrix`, write the plan to this file instead of stdout |
 
 #### Custom partition table
 
@@ -371,6 +375,97 @@ Staging custom configuration files automatically forces a clean build so CMake a
 
 > **Note:** Do not run multiple `mix atomvm.esp32.build` processes concurrently against the same `--atomvm-path`. Custom sdkconfig staging temporarily modifies the target-specific defaults file in the AtomVM checkout.
 
+#### Build matrix
+
+Projects that build several images — different components, sdkconfig, or partition tables — can declare named builds under `atomvm_builder` in `mix.exs`:
+
+```elixir
+def project do
+  [
+    ...,
+    atomvm_builder: [
+      plain: [chips: ["esp32"]],
+      full: [chips: ["esp32s3"]],
+      cam: [
+        chips: ["esp32s3"],
+        sdkconfig: "variants/cam/sdkconfig.defaults",
+        partitions: "variants/cam/partitions.csv"
+      ]
+    ]
+  ]
+end
+```
+
+Each build takes its inputs from a directory named after it; explicit options override the convention:
+
+```
+atomvm_builder/full/
+  idf_component.yml           # copied to main/idf_component.yml for the build
+  dependencies.lock           # pinned; updated from the component manager after a build
+  sdkconfig.defaults          # appended after AtomVM's own defaults
+  sdkconfig.defaults.esp32s3  # optional chip override (same suffix rule as --sdkconfig)
+  custom_partitions.csv       # used as the partition table
+```
+
+A missing file means no customization on that axis, and `dir`, `components`, `lock`, `sdkconfig`, and `partitions` select different paths. All inputs are read once before anything is cloned or built, then staged into the AtomVM checkout only while the build runs and restored afterwards. Matrix builds always start from a clean ESP32 build directory, since their inputs differ by definition.
+
+```shell
+shell$ mix atomvm.esp32.build --matrix full           # one build
+shell$ mix atomvm.esp32.build --matrix full,cam       # several
+shell$ mix atomvm.esp32.build --matrix all            # all of them
+```
+
+`--chip` overrides the chips of every selected build; the remaining build options (`--ref`, `--idf-version`, `--use-docker`, ...) apply to the whole run. Images are written as `atomvm-<build>-<chip>-elixir.img`, so builds do not overwrite each other. `--partition-table` and `--sdkconfig` cannot be combined with `--matrix`; configure those per build.
+
+`--list-matrix` resolves and validates the builds without building them, which is also how a CI pipeline generates its job matrix:
+
+```shell
+shell$ mix atomvm.esp32.build --list-matrix
+shell$ mix atomvm.esp32.build --list-matrix --format json --output matrix.json
+```
+
+The JSON is a GitHub Actions matrix, one entry per build and chip:
+
+```json
+{"include":[{"name":"full","chip":"esp32s3","image":"_build/atomvm_images/atomvm-full-esp32s3-elixir.img"}]}
+```
+
+```yaml
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+      - run: mix deps.get
+      - id: matrix
+        run: echo "include=$(mix atomvm.esp32.build --list-matrix --format json)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.include) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+      - run: mix deps.get
+      - run: mix atomvm.esp32.build --matrix ${{ matrix.name }} --use-docker
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-${{ matrix.chip }}
+          path: ${{ matrix.image }}
+```
+
 #### Examples
 
     # Build for the default esp32 chip (clones AtomVM main automatically)
@@ -381,6 +476,15 @@ Staging custom configuration files automatically forces a clean build so CMake a
 
     # Build for multiple chips in one run
     shell$ mix atomvm.esp32.build --chip esp32,esp32s3,esp32c6
+
+    # Build one configured build, several, or all of them
+    shell$ mix atomvm.esp32.build --matrix full
+    shell$ mix atomvm.esp32.build --matrix full,cam
+    shell$ mix atomvm.esp32.build --matrix all
+
+    # Show the resolved builds, or emit a CI matrix
+    shell$ mix atomvm.esp32.build --list-matrix
+    shell$ mix atomvm.esp32.build --list-matrix --format json --output matrix.json
 
     # Build from a pull request
     shell$ mix atomvm.esp32.build --ref pr/1234

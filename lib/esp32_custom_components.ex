@@ -9,10 +9,16 @@ defmodule ExAtomVM.Esp32CustomComponents do
   @manifest_marker ".exatomvm_manifest.sha256"
 
   # Capture the manifest and its lock before cloning or cleaning can remove the
-  # source, so every chip in a run stages the same bytes.
-  def load_custom_components(user_provided_path) do
+  # source, so every chip in a run stages the same bytes. The lock defaults to
+  # the manifest's directory, and an explicit path overrides that.
+  def load_custom_components(user_provided_path, lock_path \\ nil) do
     path = Path.expand(user_provided_path || @component_manifest)
-    lock_path = Path.join(Path.dirname(path), @dependencies_lock)
+
+    lock_path =
+      case lock_path do
+        nil -> Path.join(Path.dirname(path), @dependencies_lock)
+        lock_path -> Path.expand(lock_path)
+      end
 
     case File.lstat(path) do
       {:error, :enoent} when is_nil(user_provided_path) ->
