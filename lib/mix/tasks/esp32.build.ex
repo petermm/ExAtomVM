@@ -33,7 +33,8 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     * `--idf-path` - Path to idf.py executable (default: idf.py)
     * `--use-docker` - Use ESP-IDF Docker image instead of local installation
     * `--idf-version` - ESP-IDF version for Docker image (default: v5.5.4)
-    * `--clean` - Clean build directory before building
+    * `--clean` - Clean the build directory and the generated sdkconfig before building,
+      so ESP-IDF regenerates the configuration
     * `--mbedtls-prefix` - Path to custom MbedTLS installation (optional, falls back to MBEDTLS_PREFIX env var)
     * `--partition-table` - Path to custom partition table CSV file (optional, defaults to custom_partitions.csv if present)
     * `--sdkconfig` - Path to custom sdkconfig.defaults file (optional, defaults to sdkconfig.defaults if present)
@@ -666,9 +667,13 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     Esp32CustomPartitions.with_custom_partitions(platform_dir, build.partition_table, fn ->
       with_staged_sdkconfig(platform_dir, chip, build, fn ->
         Esp32CustomComponents.with_custom_components(platform_dir, build.components, fn ->
-          if clean and File.dir?(build_dir) do
-            IO.puts("Cleaning build directory...")
-            ExAtomVM.AtomVMBuilder.clean_dir(build_dir)
+          if clean do
+            if File.dir?(build_dir) do
+              IO.puts("Cleaning build directory...")
+              ExAtomVM.AtomVMBuilder.clean_dir(build_dir)
+            end
+
+            reset_generated_sdkconfig(platform_dir)
           end
 
           IO.puts("Configuring build for #{chip}...")
@@ -724,6 +729,24 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
 
   defp idf_build_args(cmake_args) do
     [@elixir_cmake_arg] ++ cmake_args ++ ["build"]
+  end
+
+  # ESP-IDF keeps the generated sdkconfig, and its values win over
+  # sdkconfig.defaults, so settings a previous build left behind (flash size,
+  # PSRAM, ...) would leak into this one. A clean build regenerates it from
+  # AtomVM's defaults and the staged sdkconfig files.
+  defp reset_generated_sdkconfig(platform_dir) do
+    removed =
+      for name <- ["sdkconfig", "sdkconfig.old"],
+          path = Path.join(platform_dir, name),
+          File.exists?(path) do
+        File.rm!(path)
+        name
+      end
+
+    if removed != [] do
+      IO.puts("Removing generated #{Enum.join(removed, " and ")}...")
+    end
   end
 
   defp run_idf_command(true, idf_version, atomvm_path, platform_dir, _idf_path, idf_args) do

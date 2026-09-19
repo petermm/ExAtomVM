@@ -383,6 +383,43 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
     end)
   end
 
+  test "--clean drops the generated sdkconfig a previous build left behind", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      atomvm_path = fake_atomvm_tree(tmp_dir)
+      platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
+      idf_path = Path.join(tmp_dir, "idf.py")
+      seen = Path.join(tmp_dir, "seen")
+
+      File.write!(Path.join(platform_dir, "sdkconfig"), "CONFIG_ESPTOOLPY_FLASHSIZE=\"16MB\"\n")
+      File.write!(Path.join(platform_dir, "sdkconfig.old"), "old\n")
+
+      put_matrix(one: [chips: ["esp32p4"]])
+
+      write_idf_script(idf_path, """
+      if [ -f sdkconfig ]; then echo present > "#{seen}"; else echo absent > "#{seen}"; fi
+      exit 1
+      """)
+
+      output =
+        capture_io(fn ->
+          assert catch_exit(
+                   Build.run([
+                     "--atomvm-path",
+                     atomvm_path,
+                     "--idf-path",
+                     idf_path,
+                     "--matrix",
+                     "one"
+                   ])
+                 ) == {:shutdown, 1}
+        end)
+
+      assert File.read!(seen) == "absent\n"
+      assert output =~ "Removing generated sdkconfig and sdkconfig.old..."
+      refute File.exists?(Path.join(platform_dir, "sdkconfig.old"))
+    end)
+  end
+
   test "--matrix passes cmake_args to idf.py", %{tmp_dir: tmp_dir} do
     File.cd!(tmp_dir, fn ->
       atomvm_path = fake_atomvm_tree(tmp_dir)
@@ -473,24 +510,19 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
   test "--with-zips writes the installer bundle next to the image", %{tmp_dir: tmp_dir} do
     File.cd!(tmp_dir, fn ->
       atomvm_path = fake_atomvm_tree(tmp_dir)
-      platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
       idf_path = Path.join(tmp_dir, "idf.py")
       fixtures = write_build_fixtures(tmp_dir)
 
       write_entry("one", "dependencies: {}\n", @partitions)
       put_matrix(one: [chips: ["esp32p4"]])
 
-      File.write!(Path.join(platform_dir, "sdkconfig"), """
-      CONFIG_APP_PROJECT_VER="test"
-      CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-elixir.csv"
-      """)
-
       # A build that succeeds: every idf.py run recreates the build outputs the
       # bundle is assembled from, including an image whose parts match
-      # flasher_args.json.
+      # flasher_args.json, and the sdkconfig ESP-IDF regenerates.
       write_idf_script(idf_path, """
       mkdir -p build
       cp -R #{fixtures}/. build/
+      cp #{fixtures}/sdkconfig sdkconfig
       exit 0
       """)
 
@@ -596,6 +628,16 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
 
     File.write!(Path.join(dir, "image"), build_image())
     File.write!(Path.join(dir, "flasher_args.json"), flasher_args())
+
+    File.write!(Path.join(dir, "sdkconfig"), """
+    #
+    # Espressif IoT Development Framework (ESP-IDF) 5.5.5 Project Configuration
+    #
+    CONFIG_APP_PROJECT_VER="test"
+    CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-elixir.csv"
+    CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+    """)
+
     File.write!(Path.join(dir, "mkimage.config"), "config = []\n")
     write_mkimage_script(Path.join(dir, "mkimage.erl"), Path.join(dir, "image"))
 

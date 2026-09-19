@@ -343,7 +343,7 @@ shell$ mix atomvm.esp32.build --mbedtls-prefix /opt/homebrew/opt/mbedtls@3 --cle
 | `--idf-path` | `idf.py` | Path to the `idf.py` executable |
 | `--use-docker` | `false` | Use the ESP-IDF Docker image instead of a local installation |
 | `--idf-version` | `v5.5.4` | ESP-IDF version for the Docker image |
-| `--clean` | `false` | Clean the build directory before building |
+| `--clean` | `false` | Clean the build directory and the generated sdkconfig before building |
 | `--mbedtls-prefix` | - | Path to a custom MbedTLS installation (falls back to the `MBEDTLS_PREFIX` env var) |
 | `--partition-table` | - | Path to custom partition table CSV file (falls back to `custom_partitions.csv` in project root) |
 | `--sdkconfig` | - | Path to custom `sdkconfig.defaults` file (falls back to `sdkconfig.defaults` in project root) |
@@ -381,7 +381,7 @@ If the `--sdkconfig` option is not provided but the root of your Mix project con
 
 The task also supports chip-specific defaults by looking for a suffix corresponding to the target chip, e.g. `sdkconfig.defaults.esp32s3` or `my_config.defaults.esp32s3`. If found, these chip-specific overrides are automatically appended to the base defaults. A chip-specific file can also be used without a base file.
 
-Staging custom configuration files automatically forces a clean build so CMake and ESP-IDF re-evaluate all settings. The files are staged temporarily and the AtomVM checkout is restored clean after compilation.
+Staging custom configuration files automatically forces a clean build so CMake and ESP-IDF re-evaluate all settings: the build directory and the generated `sdkconfig` are removed, so settings a previous build left behind (flash size, PSRAM, ...) cannot leak into this one. The staged files are removed and the AtomVM checkout is restored clean after compilation.
 
 > **Note:** Do not run multiple `mix atomvm.esp32.build` processes concurrently against the same `--atomvm-path`. Custom sdkconfig staging temporarily modifies the target-specific defaults file in the AtomVM checkout.
 
