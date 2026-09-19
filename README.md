@@ -417,7 +417,15 @@ atomvm_builder/full/
   custom_partitions.csv       # used as the partition table
 ```
 
-A missing file means no customization on that axis, and `dir`, `components`, `lock`, `sdkconfig`, and `partitions` select different paths. `cmake_args` passes extra arguments to `idf.py`, as a list of strings or a single string, for example `["-DAVM_USE_LIBSODIUM=ON", "-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"]`. All inputs are read once before anything is cloned or built, then staged into the AtomVM checkout only while the build runs and restored afterwards. Matrix builds always start from a clean ESP32 build directory, since their inputs differ by definition.
+A missing file means no customization on that axis, and `dir`, `components`, `lock`, `sdkconfig`, and `partitions` select different paths. `output_name` replaces the build's name in its image and bundle names, for builds that differ only in how they fit a board (a partition table, say) and should still carry one product name on every chip:
+
+```elixir
+atomgl_psram: [chips: ["esp32s3"], features: ["psram"], output_name: "atomgl_psram"],
+atomgl_psram_c5: [chips: ["esp32c5"], features: ["psram"], output_name: "atomgl_psram"]
+# atomvm-esp32s3-atomgl_psram-elixir.img and atomvm-esp32c5-atomgl_psram-elixir.img
+```
+
+Two builds writing the same image is an error, whether they share an `output_name` on one chip or a `--chip` override puts them there. `cmake_args` passes extra arguments to `idf.py`, as a list of strings or a single string, for example `["-DAVM_USE_LIBSODIUM=ON", "-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"]`. All inputs are read once before anything is cloned or built, then staged into the AtomVM checkout only while the build runs and restored afterwards. Matrix builds always start from a clean ESP32 build directory, since their inputs differ by definition.
 
 Shared `features`, declared once under the reserved `features` key, bundle an sdkconfig fragment and CMake arguments that builds select by name:
 

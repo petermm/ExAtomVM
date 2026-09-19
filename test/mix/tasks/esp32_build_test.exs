@@ -260,16 +260,22 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
   test "--list-matrix prints the resolved builds", %{tmp_dir: tmp_dir} do
     File.cd!(tmp_dir, fn ->
       write_entry("full", "dependencies: {}\n", "nvs, data, nvs, 0x9000, 0x6000,\n")
-      put_matrix(full: [chips: ["esp32p4", "esp32c3"], cmake_args: ["-DAVM_USE_LIBSODIUM=ON"]])
+      write_entry("full_c3", "dependencies: {}\n", "nvs, data, nvs, 0x9000, 0x6000,\n")
+
+      put_matrix(
+        full: [chips: ["esp32p4"], cmake_args: ["-DAVM_USE_LIBSODIUM=ON"]],
+        full_c3: [chips: ["esp32c3"], output_name: "full"]
+      )
 
       output = capture_io(fn -> Build.run(["--list-matrix"]) end)
 
-      assert output =~ "Build matrix (1 build(s))"
-      assert output =~ "full: esp32p4, esp32c3"
+      assert output =~ "Build matrix (2 build(s))"
+      assert output =~ "full: esp32p4"
       assert output =~ "cmake_args: -DAVM_USE_LIBSODIUM=ON"
       assert output =~ "atomvm_builder/full"
       assert output =~ "    image: _build/atomvm_images/atomvm-esp32p4-full-elixir.img\n"
       assert output =~ "    image: _build/atomvm_images/atomvm-esp32c3-full-elixir.img\n"
+      assert output =~ "    output_name: full\n"
       refute output =~ "false"
     end)
   end
@@ -507,14 +513,15 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
     end)
   end
 
-  test "--with-zips writes the installer bundle next to the image", %{tmp_dir: tmp_dir} do
+  test "--with-zips writes the installer bundle next to the image it is named after",
+       %{tmp_dir: tmp_dir} do
     File.cd!(tmp_dir, fn ->
       atomvm_path = fake_atomvm_tree(tmp_dir)
       idf_path = Path.join(tmp_dir, "idf.py")
       fixtures = write_build_fixtures(tmp_dir)
 
       write_entry("one", "dependencies: {}\n", @partitions)
-      put_matrix(one: [chips: ["esp32p4"]])
+      put_matrix(one: [chips: ["esp32p4"], output_name: "product"])
 
       # A build that succeeds: every idf.py run recreates the build outputs the
       # bundle is assembled from, including an image whose parts match
@@ -526,8 +533,8 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
       exit 0
       """)
 
-      image = "_build/atomvm_images/atomvm-esp32p4-one-elixir.img"
-      zip = "_build/atomvm_images/atomvm-esp32p4-one-elixir.zip"
+      image = "_build/atomvm_images/atomvm-esp32p4-product-elixir.img"
+      zip = "_build/atomvm_images/atomvm-esp32p4-product-elixir.zip"
 
       output =
         capture_io(fn ->
@@ -560,7 +567,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
       assert {:ok, bundle} =
                Esp32FirmwareImages.verify_bundle(File.read!(zip), Path.basename(zip), nil)
 
-      assert bundle.stem == "atomvm-esp32p4-one-elixir"
+      assert bundle.stem == "atomvm-esp32p4-product-elixir"
       assert bundle.flash.chip == "esp32p4"
       assert bundle.image == File.read!(image)
       assert bundle.parts["atomvm-esp32.bin"] == @app

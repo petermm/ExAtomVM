@@ -204,6 +204,95 @@ defmodule ExAtomVM.Esp32BuildMatrixTest do
     end)
   end
 
+  test "output_name lets a build keep its product name on another chip", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      config = [
+        full: [chips: ["esp32s3"], output_name: "product"],
+        full_c5: [chips: ["esp32c5"], output_name: "product"]
+      ]
+
+      assert {:ok, [s3, c5]} = Esp32BuildMatrix.resolve(config, :all)
+      assert s3.name == "full" and s3.output_name == "product"
+      assert c5.name == "full_c5" and c5.output_name == "product"
+
+      assert [%{name: "full", output_name: "product", images: [s3_image]}, %{images: [c5_image]}] =
+               Esp32BuildMatrix.plan([s3, c5])
+
+      assert s3_image == "_build/atomvm_images/atomvm-esp32s3-product-elixir.img"
+      assert c5_image == "_build/atomvm_images/atomvm-esp32c5-product-elixir.img"
+
+      assert %{
+               "include" => [
+                 %{"name" => "full", "chip" => "esp32s3", "output_name" => "product"},
+                 %{"name" => "full_c5", "chip" => "esp32c5", "output_name" => "product"}
+               ]
+             } = Esp32BuildMatrix.to_json([s3, c5]) |> :json.decode()
+
+      # A build that does not set one keeps its own name, and the plan does not
+      # repeat it.
+      assert {:ok, [plain]} = Esp32BuildMatrix.resolve([full: [chips: ["esp32"]]], :all)
+      assert [%{output_name: "full"}] = Esp32BuildMatrix.plan([plain])
+
+      refute Map.has_key?(
+               :json.decode(Esp32BuildMatrix.to_json([plain]))["include"] |> hd(),
+               "output_name"
+             )
+    end)
+  end
+
+  test "rejects an output_name that would overwrite another build's image", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      config = [
+        full: [chips: ["esp32s3"], output_name: "product"],
+        full_again: [chips: ["esp32s3"], output_name: "product"]
+      ]
+
+      assert {:error, "builds full and full_again both write " <> image} =
+               Esp32BuildMatrix.resolve(config, :all)
+
+      assert image == "_build/atomvm_images/atomvm-esp32s3-product-elixir.img"
+
+      # A chip override in the task would collide the same way, so the task
+      # validates again after applying it.
+      assert {:ok, [one, two]} =
+               Esp32BuildMatrix.resolve(
+                 [
+                   one: [chips: ["esp32s3"], output_name: "product"],
+                   two: [chips: ["esp32c5"], output_name: "product"]
+                 ],
+                 :all
+               )
+
+      assert :ok = Esp32BuildMatrix.validate_outputs([one, two])
+
+      assert {:error, _reason} =
+               Esp32BuildMatrix.validate_outputs([one, %{two | chips: ["esp32s3"]}])
+
+      # A build whose chips already include another build's chip collides the
+      # same way, even without an override.
+      assert {:error, "builds wide and narrow both write " <> collision} =
+               Esp32BuildMatrix.resolve(
+                 [
+                   wide: [chips: ["esp32s3", "esp32c5"], output_name: "product"],
+                   narrow: [chips: ["esp32c5"], output_name: "product"]
+                 ],
+                 :all
+               )
+
+      assert collision == "_build/atomvm_images/atomvm-esp32c5-product-elixir.img"
+    end)
+  end
+
+  test "rejects an empty output_name", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      assert {:error, "build full output_name must not be empty"} =
+               Esp32BuildMatrix.resolve([full: [chips: ["esp32"], output_name: "  "]], :all)
+
+      assert {:error, "build full output_name must be a string"} =
+               Esp32BuildMatrix.resolve([full: [chips: ["esp32"], output_name: :product]], :all)
+    end)
+  end
+
   test "rejects feature mistakes", %{tmp_dir: tmp_dir} do
     File.cd!(tmp_dir, fn ->
       write("features/one.sdkconfig", "CONFIG_A=y\n")

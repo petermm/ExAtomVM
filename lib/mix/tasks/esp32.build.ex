@@ -75,7 +75,9 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
   are staged into the AtomVM checkout for the build and restored afterwards;
   matrix builds always start from a clean ESP32 build directory. Each image is
   written as `atomvm-<chip>-<build>-elixir.img`, and `--chip` overrides the
-  chips of every selected build. With `--with-zips`, the build also writes next
+  chips of every selected build. `output_name` replaces the build's name in the
+  image and bundle names, so builds that differ only in how they fit a board
+  (a partition table, say) still produce the same product name on every chip. With `--with-zips`, the build also writes next
   to the image the bundle `mix atomvm.esp32.install` reads, with the parts of
   the image, the sdkconfig and partition table it was built with, FLASH.txt,
   checksums, and the ELF and map files.
@@ -244,6 +246,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
         [
           "  #{plan.name}: #{Enum.join(plan.chips, ", ")}",
           "    directory: #{plan.dir}",
+          plan.output_name != plan.name && "    output_name: #{plan.output_name}",
           plan.features != [] && "    features: #{Enum.join(plan.features, ", ")}",
           plan.cmake_args != [] && "    cmake_args: #{Enum.join(plan.cmake_args, " ")}",
           plan.components && "    components: #{plan.components}",
@@ -282,9 +285,15 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
         {:error, reason} -> error_exit(reason)
       end
 
-    case Keyword.get(opts, :chip) do
-      nil -> builds
-      chip -> Enum.map(builds, &%{&1 | chips: parse_chips(chip)})
+    builds =
+      case Keyword.get(opts, :chip) do
+        nil -> builds
+        chip -> Enum.map(builds, &%{&1 | chips: parse_chips(chip)})
+      end
+
+    case Esp32BuildMatrix.validate_outputs(builds) do
+      :ok -> builds
+      {:error, reason} -> error_exit(reason)
     end
   end
 
@@ -305,6 +314,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
 
     %{
       name: nil,
+      output_name: nil,
       dir: nil,
       chips: parse_chips(Keyword.get(opts, :chip, @default_chip)),
       features: [],
@@ -708,7 +718,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
                     Path.expand(atomvm_path),
                     Path.expand(build_dir),
                     use_docker,
-                    Esp32BuildMatrix.image_stem(build.name, chip)
+                    Esp32BuildMatrix.image_stem(build.output_name, chip)
                   )
 
                 _status ->

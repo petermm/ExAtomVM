@@ -43,7 +43,17 @@ defmodule ExAtomVM.Esp32BuildMatrix do
   @sdkconfig_defaults "sdkconfig.defaults"
   @custom_partitions "custom_partitions.csv"
   @features_key "features"
-  @entry_keys [:chips, :dir, :components, :lock, :sdkconfig, :partitions, :cmake_args, :features]
+  @entry_keys [
+    :chips,
+    :dir,
+    :components,
+    :lock,
+    :sdkconfig,
+    :partitions,
+    :cmake_args,
+    :features,
+    :output_name
+  ]
   @feature_keys [:sdkconfig, :cmake_args]
   @path_keys [:dir, :components, :lock, :sdkconfig, :partitions]
   @chip_format ~r/^esp32[a-z0-9]*$/
@@ -68,8 +78,33 @@ defmodule ExAtomVM.Esp32BuildMatrix do
   """
   def resolve(config, selection) do
     with {:ok, features, builds} <- normalize(config),
-         {:ok, selected} <- select(builds, selection) do
-      resolve_entries(selected, features)
+         {:ok, selected} <- select(builds, selection),
+         {:ok, resolved} <- resolve_entries(selected, features),
+         :ok <- validate_outputs(resolved) do
+      {:ok, resolved}
+    end
+  end
+
+  @doc """
+  Checks that no two builds write the same image.
+
+  `output_name` lets builds that differ only in their board inputs share a
+  product name, so two of them on one chip would overwrite each other.
+  """
+  def validate_outputs(builds) do
+    builds
+    |> Enum.flat_map(fn build ->
+      Enum.map(build.chips, &{image_path(build.output_name, &1), build.name})
+    end)
+    |> Enum.reduce_while(%{}, fn {image, name}, seen ->
+      case Map.fetch(seen, image) do
+        :error -> {:cont, Map.put(seen, image, name)}
+        {:ok, other} -> {:halt, {:error, "builds #{other} and #{name} both write #{image}"}}
+      end
+    end)
+    |> case do
+      {:error, reason} -> {:error, reason}
+      %{} -> :ok
     end
   end
 
@@ -80,6 +115,7 @@ defmodule ExAtomVM.Esp32BuildMatrix do
     Enum.map(builds, fn build ->
       %{
         name: build.name,
+        output_name: build.output_name,
         chips: build.chips,
         dir: Path.relative_to_cwd(build.dir),
         features: build.features,
@@ -88,7 +124,7 @@ defmodule ExAtomVM.Esp32BuildMatrix do
         sdkconfig: build.sdkconfig && Path.relative_to_cwd(build.sdkconfig),
         partition_table:
           build.partition_table && Path.relative_to_cwd(build.partition_table.path),
-        images: Enum.map(build.chips, &image_path(build.name, &1))
+        images: Enum.map(build.chips, &image_path(build.output_name, &1))
       }
     end)
   end
@@ -101,10 +137,15 @@ defmodule ExAtomVM.Esp32BuildMatrix do
       for build <- builds, chip <- build.chips do
         %{
           "name" => build.name,
+          "output_name" => build.output_name,
           "chip" => chip,
           "features" => build.features,
-          "image" => image_path(build.name, chip)
+          "image" => image_path(build.output_name, chip)
         }
+        |> Map.reject(fn
+          {"output_name", output_name} -> output_name == build.name
+          {_key, value} -> value == []
+        end)
       end
 
     %{"include" => include}
@@ -363,17 +404,37 @@ defmodule ExAtomVM.Esp32BuildMatrix do
     with {:ok, options} <- options_map("build", name, opts),
          :ok <- reject_unknown_keys("build", name, options, @entry_keys),
          {:ok, chips} <- entry_chips(name, options),
+         {:ok, output_name} <- entry_output_name(name, options),
          {:ok, selected} <- entry_features(name, options, features),
          {:ok, cmake_args} <- cmake_args("build", name, options) do
       {:ok,
        %{
          name: name,
+         output_name: output_name,
          options: options,
          chips: chips,
          features: Enum.map(selected, & &1.name),
          feature_sdkconfigs: selected |> Enum.map(& &1.sdkconfig) |> Enum.reject(&is_nil/1),
          cmake_args: Enum.uniq(Enum.flat_map(selected, & &1.cmake_args) ++ cmake_args)
        }}
+    end
+  end
+
+  # The name this build's images carry, `atomvm-<chip>-<output_name>-elixir`.
+  # It defaults to the entry's own name, and lets builds that differ only in how
+  # they fit a board (a partition table, say) still produce the same product
+  # name on every chip.
+  defp entry_output_name(name, options) do
+    case Map.get(options, :output_name, name) do
+      output_name when is_binary(output_name) ->
+        if String.trim(output_name) == "" do
+          {:error, "build #{name} output_name must not be empty"}
+        else
+          {:ok, output_name}
+        end
+
+      _other ->
+        {:error, "build #{name} output_name must be a string"}
     end
   end
 
@@ -511,6 +572,7 @@ defmodule ExAtomVM.Esp32BuildMatrix do
 
   defp resolve_entry(%{
          name: name,
+         output_name: output_name,
          options: options,
          chips: chips,
          features: features,
@@ -525,6 +587,7 @@ defmodule ExAtomVM.Esp32BuildMatrix do
       {:ok,
        %{
          name: name,
+         output_name: output_name,
          dir: dir,
          chips: chips,
          features: features,
