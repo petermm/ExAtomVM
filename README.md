@@ -363,7 +363,7 @@ mix atomvm.esp32.build --partition-table path/to/partitions.csv
 
 If the `--partition-table` option is not provided but the root of your Mix project contains `custom_partitions.csv`, it is used as the default partition table for the build.
 
-ExAtomVM passes custom partition contents through unchanged, without imposing partition names, types, offsets, or sizes. It only checks that the selected file is readable, non-empty, and regular; AtomVM and ESP-IDF handle the contents during the build.
+ExAtomVM passes custom partition contents through unchanged, without imposing partition names, types, offsets, or sizes. It only checks that the selected file is readable, non-empty, and regular; AtomVM and ESP-IDF handle the contents during the build. One offset is not free: AtomVM picks the boot library flavour from the `main.avm` offset, so keep it at `0x250000` (`0x300000` for a JIT build) - otherwise the build ends with "mkimage.config configures no boot library". `boot.avm` can sit anywhere, it is found by partition name.
 
 The selected file is read once before cloning or building and reused for every chip, even if cleaning removes the source file. Its contents are copied into the AtomVM ESP32 platform tree only while the build runs — so Docker builds see it through the mounted AtomVM source tree — and the original partition table is restored afterwards, leaving the AtomVM checkout clean.
 

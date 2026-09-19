@@ -794,6 +794,13 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
            "retry with --clean, and ensure the AtomVM ref honours -DATOMVM_ELIXIR_SUPPORT=on " <>
            "(older AtomVM revisions predate this CMake option)."}
 
+      no_boot_library_configured?(mkimage_config) ->
+        {:error,
+         "mkimage.config configures no boot library. AtomVM selects it from the " <>
+           "partition table's main.avm offset, so a custom partition table has to keep " <>
+           "main.avm at 0x250000 (0x300000 for a JIT build); boot.avm can sit anywhere, " <>
+           "it is found by partition name."}
+
       true ->
         IO.puts("Creating flashable image...")
         run_mkimage(atomvm_path, build_dir, mkimage_erl, mkimage_config, output_img, use_docker)
@@ -804,6 +811,14 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     mkimage_config
     |> File.read!()
     |> String.contains?("esp32boot/esp32boot.avm")
+  end
+
+  # AtomVM's GetBootAVM.cmake sets the boot library to NONE when the partition
+  # table's main.avm offset is neither 0x250000 nor 0x300000.
+  defp no_boot_library_configured?(mkimage_config) do
+    mkimage_config
+    |> File.read!()
+    |> String.contains?("esp32boot/NONE")
   end
 
   defp run_mkimage(atomvm_path, build_dir, mkimage_erl, mkimage_config, output_img, use_docker) do

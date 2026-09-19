@@ -568,6 +568,48 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
     end)
   end
 
+  test "explains a partition table whose main.avm offset AtomVM does not know", %{
+    tmp_dir: tmp_dir
+  } do
+    File.cd!(tmp_dir, fn ->
+      atomvm_path = fake_atomvm_tree(tmp_dir)
+      idf_path = Path.join(tmp_dir, "idf.py")
+      fixtures = write_build_fixtures(tmp_dir)
+
+      write_entry("one", "dependencies: {}\n", @partitions)
+      put_matrix(one: [chips: ["esp32p4"]])
+
+      File.write!(
+        Path.join(fixtures, "mkimage.config"),
+        "config = [{name, \"boot\"}, {offset, \"0x290000\"}, {path, [\"/project/build/libs/esp32boot/NONE\"]}].\n"
+      )
+
+      write_idf_script(idf_path, """
+      mkdir -p build
+      cp -R #{fixtures}/. build/
+      cp #{fixtures}/sdkconfig sdkconfig
+      exit 0
+      """)
+
+      output =
+        capture_io(fn ->
+          assert catch_exit(
+                   Build.run([
+                     "--atomvm-path",
+                     atomvm_path,
+                     "--idf-path",
+                     idf_path,
+                     "--matrix",
+                     "one"
+                   ])
+                 ) == {:shutdown, 1}
+        end)
+
+      assert output =~ "mkimage.config configures no boot library"
+      assert output =~ "keep main.avm at 0x250000"
+    end)
+  end
+
   defp put_matrix(config) do
     Application.put_env(:exatomvm, :atomvm_builder, config)
     on_exit(fn -> Application.delete_env(:exatomvm, :atomvm_builder) end)
