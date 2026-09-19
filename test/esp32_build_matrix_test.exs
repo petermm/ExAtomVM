@@ -295,7 +295,7 @@ defmodule ExAtomVM.Esp32BuildMatrixTest do
       assert [%{name: "full", chips: ["esp32s3"], images: [image]}] =
                Esp32BuildMatrix.plan(builds)
 
-      assert image == "_build/atomvm_images/atomvm-full-esp32s3-elixir.img"
+      assert image == "_build/atomvm_images/atomvm-esp32s3-full-elixir.img"
 
       assert %{"include" => [%{"name" => "full", "chip" => "esp32s3", "image" => ^image}]} =
                builds |> Esp32BuildMatrix.to_json() |> :json.decode()
@@ -304,7 +304,7 @@ defmodule ExAtomVM.Esp32BuildMatrixTest do
 
   test "image names distinguish builds from the implicit build" do
     assert Esp32BuildMatrix.image_stem(nil, "esp32") == "atomvm-esp32-elixir"
-    assert Esp32BuildMatrix.image_stem("full", "esp32s3") == "atomvm-full-esp32s3-elixir"
+    assert Esp32BuildMatrix.image_stem("full", "esp32s3") == "atomvm-esp32s3-full-elixir"
 
     assert Esp32BuildMatrix.image_path(nil, "esp32") ==
              "_build/atomvm_images/atomvm-esp32-elixir.img"

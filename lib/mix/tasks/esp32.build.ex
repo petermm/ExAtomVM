@@ -41,6 +41,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     * `--list-matrix` - Resolve the configured builds, print them, and exit without building
     * `--format` - With `--list-matrix`, `text` (default) or `json`
     * `--output` - With `--list-matrix`, write the plan to this file instead of stdout
+    * `--with-zips` - Also write the flashable bundle next to each image (default: off)
 
   If `--partition-table` is provided, or if your Mix project root contains `custom_partitions.csv`,
   it will be used as the ESP32 partition table for the build. ExAtomVM passes the contents
@@ -72,8 +73,11 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
   `["-DAVM_USE_LIBSODIUM=ON", "-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"]`. Inputs
   are staged into the AtomVM checkout for the build and restored afterwards;
   matrix builds always start from a clean ESP32 build directory. Each image is
-  written as `atomvm-<build>-<chip>-elixir.img`, and `--chip` overrides the
-  chips of every selected build.
+  written as `atomvm-<chip>-<build>-elixir.img`, and `--chip` overrides the
+  chips of every selected build. With `--with-zips`, the build also writes next
+  to the image the bundle `mix atomvm.esp32.install` reads, with the parts of
+  the image, the sdkconfig and partition table it was built with, FLASH.txt,
+  checksums, and the ELF and map files.
 
   Builds may select shared `features`, declared under the reserved `features`
   key, which contribute an sdkconfig fragment and CMake arguments:
@@ -146,6 +150,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
   alias ExAtomVM.Esp32BuildStaging
   alias ExAtomVM.Esp32CustomComponents
   alias ExAtomVM.Esp32CustomPartitions
+  alias ExAtomVM.Esp32FirmwareBundle
 
   @shortdoc "Build AtomVM for ESP32 from source"
 
@@ -175,7 +180,8 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
           matrix: :string,
           list_matrix: :boolean,
           format: :string,
-          output: :string
+          output: :string,
+          with_zips: :boolean
         ]
       )
 
@@ -329,6 +335,15 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     mbedtls_prefix = Keyword.get(opts, :mbedtls_prefix) || System.get_env("MBEDTLS_PREFIX")
     matrix? = Enum.any?(builds, &(&1.name != nil))
 
+    context = %{
+      idf_path: idf_path,
+      idf_version: idf_version,
+      use_docker: use_docker,
+      clean: clean,
+      matrix?: matrix?,
+      with_zips?: Keyword.get(opts, :with_zips, false)
+    }
+
     # Use --atomvm-path, --atomvm-url, or default to AtomVM/AtomVM main branch.
     # Expand to an absolute path so Docker bind mounts (`-v <host>:/project`)
     # and any later relative-path math work consistently.
@@ -363,17 +378,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
           build.chips
           |> Enum.with_index(1)
           |> Enum.map(fn {chip, index} ->
-            build_chip(
-              build,
-              chip,
-              index,
-              atomvm_path,
-              idf_path,
-              idf_version,
-              use_docker,
-              clean,
-              matrix?
-            )
+            build_chip(build, chip, index, atomvm_path, context)
           end)
         end)
 
@@ -412,17 +417,16 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     """
   end
 
-  defp build_chip(
-         build,
-         chip,
-         index,
-         atomvm_path,
-         idf_path,
-         idf_version,
-         use_docker,
-         clean,
-         matrix?
-       ) do
+  defp build_chip(build, chip, index, atomvm_path, context) do
+    %{
+      idf_path: idf_path,
+      idf_version: idf_version,
+      use_docker: use_docker,
+      clean: clean,
+      matrix?: matrix?,
+      with_zips?: with_zips?
+    } = context
+
     total = length(build.chips)
 
     cond do
@@ -448,8 +452,46 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
       clean or matrix? or index > 1 or not is_nil(build.partition_table) or custom_sdkconfig?
 
     case build_atomvm(atomvm_path, chip, idf_path, idf_version, use_docker, force_clean, build) do
-      {:ok, src_img} -> {build.name, chip, :ok, save_image(src_img)}
-      {:error, reason} -> {build.name, chip, :error, reason}
+      {:ok, src_img} ->
+        img = save_image(src_img)
+
+        if with_zips? do
+          case write_bundle(build, chip, img, atomvm_path) do
+            {:ok, zip} ->
+              IO.puts("Wrote #{zip}")
+              {build.name, chip, :ok, img}
+
+            {:error, reason} ->
+              {build.name, chip, :error, reason}
+          end
+        else
+          {build.name, chip, :ok, img}
+        end
+
+      {:error, reason} ->
+        {build.name, chip, :error, reason}
+    end
+  end
+
+  # With --with-zips, every image is also written as the bundle
+  # `mix atomvm.esp32.install` reads, next to the image: the parts of the image,
+  # the config it was built with, FLASH.txt, checksums, and the ELF and map
+  # files.
+  defp write_bundle(build, chip, image_path, atomvm_path) do
+    platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
+
+    options = %{
+      stem: Path.basename(image_path, ".img"),
+      image: image_path,
+      build_dir: Path.join(platform_dir, "build"),
+      platform_dir: platform_dir,
+      chip: chip,
+      partitions: build.partition_table && build.partition_table.content
+    }
+
+    case Esp32FirmwareBundle.write(options) do
+      {:ok, zip} -> {:ok, relative_path(zip, File.cwd!())}
+      {:error, reason} -> {:error, "could not write the bundle: #{reason}"}
     end
   end
 

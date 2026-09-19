@@ -1,11 +1,25 @@
 defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
   use ExUnit.Case, async: false
 
+  alias ExAtomVM.Esp32FirmwareImages
   alias Mix.Tasks.Atomvm.Esp32.Build
 
   import ExUnit.CaptureIO
 
   @moduletag :tmp_dir
+
+  @bootloader "bootloader bytes"
+  @table "partition table bytes"
+  @app "application bytes"
+  @lib "boot library bytes"
+
+  @partitions """
+  # Name,   Type, SubType, Offset,  Size, Flags
+  nvs,      data, nvs,     0x9000,  0x6000,
+  factory,  app,  factory, 0x10000, 0x1C0000,
+  boot.avm, data, phy,     0x1D0000, 0x80000,
+  main.avm, data, phy,     0x250000, 0x1B0000
+  """
 
   test "custom_sdkconfig_paths/2 resolves defaults in given directory", %{tmp_dir: tmp_dir} do
     # 1. Neither base nor chip exists
@@ -254,8 +268,8 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
       assert output =~ "full: esp32p4, esp32c3"
       assert output =~ "cmake_args: -DAVM_USE_LIBSODIUM=ON"
       assert output =~ "atomvm_builder/full"
-      assert output =~ "    image: _build/atomvm_images/atomvm-full-esp32p4-elixir.img\n"
-      assert output =~ "    image: _build/atomvm_images/atomvm-full-esp32c3-elixir.img\n"
+      assert output =~ "    image: _build/atomvm_images/atomvm-esp32p4-full-elixir.img\n"
+      assert output =~ "    image: _build/atomvm_images/atomvm-esp32c3-full-elixir.img\n"
       refute output =~ "false"
     end)
   end
@@ -456,6 +470,72 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
     end)
   end
 
+  test "--with-zips writes the installer bundle next to the image", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      atomvm_path = fake_atomvm_tree(tmp_dir)
+      platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
+      idf_path = Path.join(tmp_dir, "idf.py")
+      fixtures = write_build_fixtures(tmp_dir)
+
+      write_entry("one", "dependencies: {}\n", @partitions)
+      put_matrix(one: [chips: ["esp32p4"]])
+
+      File.write!(Path.join(platform_dir, "sdkconfig"), """
+      CONFIG_APP_PROJECT_VER="test"
+      CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-elixir.csv"
+      """)
+
+      # A build that succeeds: every idf.py run recreates the build outputs the
+      # bundle is assembled from, including an image whose parts match
+      # flasher_args.json.
+      write_idf_script(idf_path, """
+      mkdir -p build
+      cp -R #{fixtures}/. build/
+      exit 0
+      """)
+
+      image = "_build/atomvm_images/atomvm-esp32p4-one-elixir.img"
+      zip = "_build/atomvm_images/atomvm-esp32p4-one-elixir.zip"
+
+      output =
+        capture_io(fn ->
+          Build.run([
+            "--atomvm-path",
+            atomvm_path,
+            "--idf-path",
+            idf_path,
+            "--matrix",
+            "one"
+          ])
+        end)
+
+      assert File.exists?(image)
+      refute File.exists?(zip)
+      assert output =~ image
+
+      capture_io(fn ->
+        Build.run([
+          "--atomvm-path",
+          atomvm_path,
+          "--idf-path",
+          idf_path,
+          "--matrix",
+          "one",
+          "--with-zips"
+        ])
+      end)
+
+      assert {:ok, bundle} =
+               Esp32FirmwareImages.verify_bundle(File.read!(zip), Path.basename(zip), nil)
+
+      assert bundle.stem == "atomvm-esp32p4-one-elixir"
+      assert bundle.flash.chip == "esp32p4"
+      assert bundle.image == File.read!(image)
+      assert bundle.parts["atomvm-esp32.bin"] == @app
+      assert bundle.partitions_csv == @partitions
+    end)
+  end
+
   defp put_matrix(config) do
     Application.put_env(:exatomvm, :atomvm_builder, config)
     on_exit(fn -> Application.delete_env(:exatomvm, :atomvm_builder) end)
@@ -488,5 +568,81 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
   defp write_idf_script(path, body) do
     File.write!(path, "#!/bin/sh\n" <> body)
     File.chmod!(path, 0o755)
+  end
+
+  # Everything a successful ESP-IDF build leaves in its build directory: the
+  # parts named in flasher_args.json, the debug files, and an image carrying
+  # those parts at their offsets.
+  defp write_build_fixtures(tmp_dir) do
+    dir = Path.join(tmp_dir, "fixtures")
+    File.mkdir_p!(Path.join(dir, "bootloader"))
+    File.mkdir_p!(Path.join(dir, "partition_table"))
+    File.mkdir_p!(Path.join(dir, "lib"))
+
+    File.write!(Path.join(dir, "bootloader/bootloader.bin"), @bootloader)
+    File.write!(Path.join(dir, "partition_table/partition-table.bin"), @table)
+    File.write!(Path.join(dir, "atomvm-esp32.bin"), @app)
+    File.write!(Path.join(dir, "lib/elixir_esp32boot.avm"), @lib)
+
+    for file <- [
+          "atomvm-esp32.elf",
+          "atomvm-esp32.map",
+          "bootloader/bootloader.elf",
+          "bootloader/bootloader.map",
+          "prefix_map_gdbinit"
+        ] do
+      File.write!(Path.join(dir, file), "debug #{file}")
+    end
+
+    File.write!(Path.join(dir, "image"), build_image())
+    File.write!(Path.join(dir, "flasher_args.json"), flasher_args())
+    File.write!(Path.join(dir, "mkimage.config"), "config = []\n")
+    write_mkimage_script(Path.join(dir, "mkimage.erl"), Path.join(dir, "image"))
+
+    dir
+  end
+
+  # A stand-in for the mkimage.erl the AtomVM build generates: it writes the
+  # image to the path passed with --out.
+  defp write_mkimage_script(path, image_path) do
+    File.write!(path, """
+    -module(mkimage).
+    -export([main/1]).
+
+    main(Args) ->
+        {ok, _} = file:copy("#{image_path}", out(Args)),
+        halt(0).
+
+    out(["--out", Out | _]) -> Out;
+    out([_ | Rest]) -> out(Rest);
+    out([]) -> halt(1).
+    """)
+  end
+
+  defp flasher_args do
+    """
+    {
+      "flash_settings": {"flash_mode": "dio", "flash_size": "4MB", "flash_freq": "80m"},
+      "bootloader": {"offset": "0x0", "file": "bootloader/bootloader.bin"},
+      "partition-table": {"offset": "0x8000", "file": "partition_table/partition-table.bin"},
+      "app": {"offset": "0x10000", "file": "atomvm-esp32.bin"},
+      "boot.avm": {"offset": "0x1d0000", "file": "lib/elixir_esp32boot.avm"}
+    }
+    """
+  end
+
+  defp build_image do
+    size = 0x1D0000 + byte_size(@lib)
+
+    <<0xFF::size(size * 8)>>
+    |> put(0x0, @bootloader)
+    |> put(0x8000, @table)
+    |> put(0x10000, @app)
+    |> put(0x1D0000, @lib)
+  end
+
+  defp put(image, offset, data) do
+    <<binary_part(image, 0, offset)::binary, data::binary,
+      binary_part(image, offset + byte_size(data), byte_size(image) - offset - byte_size(data))::binary>>
   end
 end

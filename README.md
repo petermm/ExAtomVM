@@ -351,6 +351,7 @@ shell$ mix atomvm.esp32.build --mbedtls-prefix /opt/homebrew/opt/mbedtls@3 --cle
 | `--list-matrix` | `false` | Resolve the configured builds, print them, and exit without building |
 | `--format` | `text` | With `--list-matrix`, `text` or `json` |
 | `--output` | - | With `--list-matrix`, write the plan to this file instead of stdout |
+| `--with-zips` | `false` | Also write the flashable bundle next to each image |
 
 #### Custom partition table
 
@@ -444,7 +445,17 @@ shell$ mix atomvm.esp32.build --matrix full,cam       # several
 shell$ mix atomvm.esp32.build --matrix all            # all of them
 ```
 
-`--chip` overrides the chips of every selected build; the remaining build options (`--ref`, `--idf-version`, `--use-docker`, ...) apply to the whole run. Images are written as `atomvm-<build>-<chip>-elixir.img`, so builds do not overwrite each other. `--partition-table` and `--sdkconfig` cannot be combined with `--matrix`; configure those per build.
+`--chip` overrides the chips of every selected build; the remaining build options (`--ref`, `--idf-version`, `--use-docker`, ...) apply to the whole run. Images are written as `atomvm-<chip>-<build>-elixir.img`, so builds do not overwrite each other, and `mix atomvm.esp32.install` recognizes their chip and Elixir support. `--partition-table` and `--sdkconfig` cannot be combined with `--matrix`; configure those per build.
+
+With `--with-zips`, the build also writes next to each image the bundle `mix atomvm.esp32.install` reads, `atomvm-<chip>-<build>-elixir.zip`: the image with its `.sha256`, the `sdkconfig` and partition table it was built with, the parts of the image (`bootloader.bin`, `partition-table.bin`, `atomvm-esp32.bin`, the boot library), `FLASH.txt` with install, update and debugging instructions, the ELF and map files, and `SHA256SUMS`. A bundle installs by path or by name once listed:
+
+```shell
+shell$ mix atomvm.esp32.build --matrix full --with-zips
+shell$ mix atomvm.esp32.install --image _build/atomvm_images/atomvm-esp32s3-full-elixir.zip
+shell$ mix atomvm.esp32.install --update --image _build/atomvm_images/atomvm-esp32s3-full-elixir.zip
+```
+
+The bundle is a build output, so when it is requested, a failure to assemble it fails the build.
 
 `--list-matrix` resolves and validates the builds without building them, which is also how a CI pipeline generates its job matrix:
 
@@ -456,7 +467,7 @@ shell$ mix atomvm.esp32.build --list-matrix --format json --output matrix.json
 The JSON is a GitHub Actions matrix, one entry per build and chip:
 
 ```json
-{"include":[{"name":"full","chip":"esp32s3","image":"_build/atomvm_images/atomvm-full-esp32s3-elixir.img"}]}
+{"include":[{"name":"full","chip":"esp32s3","features":["psram"],"image":"_build/atomvm_images/atomvm-esp32s3-full-elixir.img"}]}
 ```
 
 ```yaml

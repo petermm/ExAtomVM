@@ -114,9 +114,13 @@ defmodule ExAtomVM.Esp32BuildMatrix do
 
   @doc """
   The base name of the image a build produces for a chip.
+
+  Matrix images carry the chip first, `atomvm-<chip>-<build>-elixir`, like the
+  image names `mix atomvm.esp32.install` understands, so it can tell their chip
+  and Elixir support apart.
   """
   def image_stem(nil, chip), do: "atomvm-#{chip}-elixir"
-  def image_stem(name, chip), do: "atomvm-#{name}-#{chip}-elixir"
+  def image_stem(name, chip), do: "atomvm-#{chip}-#{name}-elixir"
 
   @doc """
   The image path a build produces for a chip, relative to the project root.
