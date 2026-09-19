@@ -293,6 +293,59 @@ defmodule ExAtomVM.Esp32BuildMatrixTest do
     end)
   end
 
+  test "app_partitions names where the project application goes", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      assert {:ok, [build]} =
+               Esp32BuildMatrix.resolve(
+                 [
+                   full: [
+                     chips: ["esp32s3"],
+                     app_partitions: ["main.avm", "main_b.avm"],
+                     app_avm: "app.avm"
+                   ]
+                 ],
+                 :all
+               )
+
+      assert build.app == %{
+               partitions: ["main.avm", "main_b.avm"],
+               avm: Path.expand("app.avm")
+             }
+
+      assert [%{app_partitions: ["main.avm", "main_b.avm"]}] = Esp32BuildMatrix.plan([build])
+
+      assert %{"include" => [%{"app_partitions" => ["main.avm", "main_b.avm"]}]} =
+               Esp32BuildMatrix.to_json([build]) |> :json.decode()
+
+      # No application unless one is asked for, and the avm defaults to the
+      # project's own packed one.
+      assert {:ok, [plain]} = Esp32BuildMatrix.resolve([full: [chips: ["esp32"]]], :all)
+      assert plain.app == %{partitions: [], avm: nil}
+      assert [%{app_partitions: []}] = Esp32BuildMatrix.plan([plain])
+
+      refute Map.has_key?(
+               :json.decode(Esp32BuildMatrix.to_json([plain]))["include"] |> hd(),
+               "app_partitions"
+             )
+    end)
+  end
+
+  test "rejects application mistakes", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      assert {:error, "app_partitions must name at least one partition"} =
+               Esp32BuildMatrix.resolve([full: [chips: ["esp32"], app_partitions: []]], :all)
+
+      assert {:error, "app_partitions must be a list of partition names"} =
+               Esp32BuildMatrix.resolve(
+                 [full: [chips: ["esp32"], app_partitions: "main.avm"]],
+                 :all
+               )
+
+      assert {:error, "app_avm must be a path to an avm"} =
+               Esp32BuildMatrix.resolve([full: [chips: ["esp32"], app_avm: :app]], :all)
+    end)
+  end
+
   test "rejects feature mistakes", %{tmp_dir: tmp_dir} do
     File.cd!(tmp_dir, fn ->
       write("features/one.sdkconfig", "CONFIG_A=y\n")

@@ -37,6 +37,8 @@ defmodule ExAtomVM.Esp32FirmwareBundle do
     * `:chip` - target chip
     * `:partitions` - the partition table CSV the image was built with, when it
       differs from the one in the platform directory
+    * `:app` - `%{partitions: [names], avm: path}` for an application the image
+      carries, written into those partitions
   """
   def write(options) do
     build_dir = options.build_dir
@@ -44,12 +46,23 @@ defmodule ExAtomVM.Esp32FirmwareBundle do
 
     with {:ok, parts, flash} <- flash_parts(build_dir),
          {:ok, image} <- read_file(options.image),
-         :ok <- check_parts_in_image(Path.basename(options.image), image, parts),
          {:ok, sdkconfig} <- read_file(Path.join(platform_dir, "sdkconfig")),
-         {:ok, partitions} <- partitions_csv(platform_dir, sdkconfig, options[:partitions]),
+         {:ok, partitions} <- partition_csv(platform_dir, options[:partitions]),
+         {:ok, app} <- app_parts(partitions, options[:app]),
+         :ok <- check_parts_in_image(Path.basename(options.image), image, parts ++ app),
          {:ok, debug} <- debug_members(build_dir) do
       members =
-        members(options.stem, image, sdkconfig, partitions, parts, flash, debug, options.chip)
+        members(
+          options.stem,
+          image,
+          sdkconfig,
+          partitions,
+          parts,
+          app,
+          flash,
+          debug,
+          options.chip
+        )
 
       zip_path = Path.rootname(options.image) <> ".zip"
 
@@ -132,15 +145,86 @@ defmodule ExAtomVM.Esp32FirmwareBundle do
     parts |> Enum.find(&(&1.name == "bootloader.bin")) |> Map.fetch!(:offset)
   end
 
-  defp partitions_csv(platform_dir, sdkconfig, nil) do
+  @doc """
+  The partition table CSV the image was built with.
+
+  Reads the file the sdkconfig names, unless `override` holds the table's
+  contents (a custom table the build staged from the project).
+  """
+  def partition_csv(_platform_dir, override) when is_binary(override), do: {:ok, override}
+
+  def partition_csv(platform_dir, nil) do
     filename =
-      sdkconfig_value(sdkconfig, "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME") || "partitions.csv"
+      platform_dir
+      |> Path.join("sdkconfig")
+      |> File.read!()
+      |> sdkconfig_value("CONFIG_PARTITION_TABLE_CUSTOM_FILENAME")
+      |> Kernel.||("partitions.csv")
 
     read_file(Path.join(platform_dir, filename))
   end
 
-  defp partitions_csv(_platform_dir, _sdkconfig, content) when is_binary(content),
-    do: {:ok, content}
+  @doc """
+  The partitions of a table, by name: `%{name => %{offset: offset, size: size}}`.
+  """
+  def partition_table(csv) do
+    csv
+    |> String.split("\n")
+    |> Enum.reduce(%{}, fn line, table ->
+      case partition_fields(line) do
+        [name, _type, _subtype, offset, size | _rest] ->
+          with {:ok, offset} <- parse_table_hex(offset),
+               {:ok, size} <- parse_table_hex(size) do
+            Map.put(table, name, %{offset: offset, size: size})
+          else
+            _other -> table
+          end
+
+        _other ->
+          table
+      end
+    end)
+  end
+
+  # Partition tables write offsets and sizes as 0x-prefixed hex.
+  defp parse_table_hex(value) do
+    value
+    |> String.trim()
+    |> String.replace_prefix("0x", "")
+    |> parse_hex()
+  end
+
+  defp partition_fields(line) do
+    line
+    |> String.split("#", parts: 2)
+    |> hd()
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+  end
+
+  # The application the image carries, as parts like the ones flasher_args.json
+  # names, so it is validated against the image and written into the bundle.
+  defp app_parts(_partitions, nil), do: {:ok, []}
+
+  defp app_parts(partitions, %{partitions: names, avm: path}) do
+    table = partition_table(partitions)
+
+    with {:ok, avm} <- read_file(path) do
+      Enum.reduce_while(names, {:ok, []}, fn name, {:ok, parts} ->
+        case Map.fetch(table, name) do
+          {:ok, %{offset: offset, size: size}} when byte_size(avm) <= size ->
+            {:cont, {:ok, parts ++ [%{name: name, offset: offset, data: avm}]}}
+
+          {:ok, %{size: size}} ->
+            {:halt,
+             {:error, "the application is #{byte_size(avm)} bytes, #{name} holds #{size} bytes"}}
+
+          :error ->
+            {:halt, {:error, "the partition table has no #{name} partition"}}
+        end
+      end)
+    end
+  end
 
   defp debug_members(build_dir) do
     Enum.reduce_while(@debug_files, {:ok, []}, fn relative, {:ok, members} ->
@@ -153,12 +237,12 @@ defmodule ExAtomVM.Esp32FirmwareBundle do
 
   # --- the bundle ---
 
-  defp members(stem, image, sdkconfig, partitions, parts, flash, debug, chip) do
+  defp members(stem, image, sdkconfig, partitions, parts, apps, flash, debug, chip) do
     app_offset = partition_offset(partitions, "main.avm")
     elf_sha = elf_sha256(debug)
 
     flash_txt =
-      flash_txt(stem, chip, parts, flash, sdkconfig, app_offset, elf_sha)
+      flash_txt(stem, chip, parts, apps, flash, sdkconfig, app_offset, elf_sha)
       |> String.trim_leading("\n")
 
     summed =
@@ -176,7 +260,7 @@ defmodule ExAtomVM.Esp32FirmwareBundle do
       {"partitions.csv", partitions},
       {"FLASH.txt", flash_txt}
     ] ++
-      Enum.map(parts, &{&1.name, &1.data}) ++
+      Enum.map(parts ++ apps, &{&1.name, &1.data}) ++
       debug ++ [{"SHA256SUMS", sha256sums(summed)}]
   end
 
@@ -193,7 +277,7 @@ defmodule ExAtomVM.Esp32FirmwareBundle do
     Enum.map_join(members, "", fn {name, data} -> "#{sha256(data)}  #{name}\n" end)
   end
 
-  defp flash_txt(stem, chip, parts, flash, sdkconfig, app_offset, elf_sha) do
+  defp flash_txt(stem, chip, parts, apps, flash, sdkconfig, app_offset, elf_sha) do
     base = base_offset(parts)
     [bootloader, table, app, lib] = parts
     stamp = sdkconfig_value(sdkconfig, "CONFIG_APP_PROJECT_VER") || "unknown"
@@ -225,7 +309,7 @@ defmodule ExAtomVM.Esp32FirmwareBundle do
     machine and its boot library, laid out for a #{flash_size} flash. The gaps
     between them are filled with 0xFF, so flashing the image also erases the NVS
     partition (Wi-Fi settings and data stored by applications) and phy_init;
-    main.avm is left untouched.
+    #{app_note(apps)}
 
       esptool.py #{port} erase_flash
       esptool.py #{port} \\
@@ -272,6 +356,19 @@ defmodule ExAtomVM.Esp32FirmwareBundle do
       python -m esp_idf_monitor --port /dev/ttyUSB0 --target #{chip} \\
           atomvm-esp32.elf bootloader.elf
     """
+  end
+
+  # What the image carries in the application partition(s), and what that means
+  # for an install versus an update.
+  defp app_note([]), do: "main.avm is left untouched."
+
+  defp app_note(apps) do
+    where =
+      apps
+      |> Enum.map_join(" and ", fn part -> "#{part.name} at #{hex(part.offset)}" end)
+
+    "this image also carries the application, in #{where}. A full install\n" <>
+      "overwrites it; an update leaves it as it is."
   end
 
   defp contents(parts) do

@@ -52,7 +52,9 @@ defmodule ExAtomVM.Esp32BuildMatrix do
     :partitions,
     :cmake_args,
     :features,
-    :output_name
+    :output_name,
+    :app_partitions,
+    :app_avm
   ]
   @feature_keys [:sdkconfig, :cmake_args]
   @path_keys [:dir, :components, :lock, :sdkconfig, :partitions]
@@ -119,6 +121,7 @@ defmodule ExAtomVM.Esp32BuildMatrix do
         chips: build.chips,
         dir: Path.relative_to_cwd(build.dir),
         features: build.features,
+        app_partitions: build.app.partitions,
         cmake_args: build.cmake_args,
         components: build.components && Path.relative_to_cwd(build.components.path),
         sdkconfig: build.sdkconfig && Path.relative_to_cwd(build.sdkconfig),
@@ -140,6 +143,7 @@ defmodule ExAtomVM.Esp32BuildMatrix do
           "output_name" => build.output_name,
           "chip" => chip,
           "features" => build.features,
+          "app_partitions" => build.app.partitions,
           "image" => image_path(build.output_name, chip)
         }
         |> Map.reject(fn
@@ -405,12 +409,14 @@ defmodule ExAtomVM.Esp32BuildMatrix do
          :ok <- reject_unknown_keys("build", name, options, @entry_keys),
          {:ok, chips} <- entry_chips(name, options),
          {:ok, output_name} <- entry_output_name(name, options),
+         {:ok, app} <- entry_app(name, options),
          {:ok, selected} <- entry_features(name, options, features),
          {:ok, cmake_args} <- cmake_args("build", name, options) do
       {:ok,
        %{
          name: name,
          output_name: output_name,
+         app: app,
          options: options,
          chips: chips,
          features: Enum.map(selected, & &1.name),
@@ -435,6 +441,57 @@ defmodule ExAtomVM.Esp32BuildMatrix do
 
       _other ->
         {:error, "build #{name} output_name must be a string"}
+    end
+  end
+
+  # The application to write into the image: this project's own packed app
+  # (`mix atomvm.packbeam`), or an avm given by path, written into the named
+  # partitions of the table.
+  defp entry_app(name, options) do
+    with {:ok, partitions} <- entry_app_partitions(name, options),
+         {:ok, avm} <- entry_app_avm(name, options) do
+      {:ok, %{partitions: partitions, avm: avm}}
+    end
+  end
+
+  defp entry_app_partitions(_name, options) do
+    case Map.get(options, :app_partitions) do
+      nil ->
+        {:ok, []}
+
+      partitions when is_list(partitions) ->
+        partitions = partitions |> Enum.map(&to_string/1) |> Enum.uniq()
+
+        cond do
+          partitions == [] ->
+            {:error, "app_partitions must name at least one partition"}
+
+          Enum.any?(partitions, &(String.trim(&1) == "")) ->
+            {:error, "app_partitions must not be empty"}
+
+          true ->
+            {:ok, partitions}
+        end
+
+      _other ->
+        {:error, "app_partitions must be a list of partition names"}
+    end
+  end
+
+  defp entry_app_avm(_name, options) do
+    case Map.get(options, :app_avm) do
+      nil ->
+        {:ok, nil}
+
+      path when is_binary(path) ->
+        if String.trim(path) == "" do
+          {:error, "app_avm must not be empty"}
+        else
+          {:ok, Path.expand(path)}
+        end
+
+      _other ->
+        {:error, "app_avm must be a path to an avm"}
     end
   end
 
@@ -573,6 +630,7 @@ defmodule ExAtomVM.Esp32BuildMatrix do
   defp resolve_entry(%{
          name: name,
          output_name: output_name,
+         app: app,
          options: options,
          chips: chips,
          features: features,
@@ -588,6 +646,7 @@ defmodule ExAtomVM.Esp32BuildMatrix do
        %{
          name: name,
          output_name: output_name,
+         app: app,
          dir: dir,
          chips: chips,
          features: features,

@@ -425,7 +425,21 @@ atomgl_psram_c5: [chips: ["esp32c5"], features: ["psram"], output_name: "atomgl_
 # atomvm-esp32s3-atomgl_psram-elixir.img and atomvm-esp32c5-atomgl_psram-elixir.img
 ```
 
-Two builds writing the same image is an error, whether they share an `output_name` on one chip or a `--chip` override puts them there. `cmake_args` passes extra arguments to `idf.py`, as a list of strings or a single string, for example `["-DAVM_USE_LIBSODIUM=ON", "-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"]`. All inputs are read once before anything is cloned or built, then staged into the AtomVM checkout only while the build runs and restored afterwards. Matrix builds always start from a clean ESP32 build directory, since their inputs differ by definition.
+Two builds writing the same image is an error, whether they share an `output_name` on one chip or a `--chip` override puts them there.
+
+#### Application in the image
+
+A build can write this project's application into the image, so one flash installs the virtual machine and the app:
+
+```elixir
+tdeck: [chips: ["esp32s3"], features: ["psram"], app_partitions: ["main.avm"]]
+```
+
+`app_partitions` names the partitions that receive the packed application — `mix atomvm.packbeam` is run for the current `MIX_ENV` (use `MIX_ENV=prod` for a release image), or `app_avm: "path/to/app.avm"` names an avm to use instead. The application is spliced into the image at each partition's offset; an application bigger than its partition fails the build. Images that carry an application are app-specific, so say so in their name with `output_name`.
+
+For A/B updates, name more than one partition — `app_partitions: ["main.avm", "main_b.avm"]` writes the same application into both. AtomVM boots the app from `/dev/partition/by-name/main.avm` unless the `atomvm`/`boot_path` NVS key says otherwise (`libs/esp32boot/esp32init.erl`), which is the switch an A/B scheme flips; the build itself needs a partition named `main.avm` at `0x250000` (see the note above).
+
+The bundle carries the application as `main.avm` (or the partition names), and its `FLASH.txt` says which partitions hold it: a full install overwrites them, `--update` leaves them alone. `cmake_args` passes extra arguments to `idf.py`, as a list of strings or a single string, for example `["-DAVM_USE_LIBSODIUM=ON", "-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"]`. All inputs are read once before anything is cloned or built, then staged into the AtomVM checkout only while the build runs and restored afterwards. Matrix builds always start from a clean ESP32 build directory, since their inputs differ by definition.
 
 Shared `features`, declared once under the reserved `features` key, bundle an sdkconfig fragment and CMake arguments that builds select by name:
 

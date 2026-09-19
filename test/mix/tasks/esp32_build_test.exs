@@ -617,6 +617,115 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
     end)
   end
 
+  test "--matrix writes the project application into the named partitions", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      atomvm_path = fake_atomvm_tree(tmp_dir)
+      idf_path = Path.join(tmp_dir, "idf.py")
+      fixtures = write_build_fixtures(tmp_dir)
+
+      table = """
+      nvs,       data, nvs,     0x9000,   0x6000,
+      phy_init,  data, phy,     0xf000,   0x1000,
+      factory,   app,  factory, 0x10000,  0x1C0000,
+      boot.avm,  data, phy,     0x1D0000, 0x80000,
+      main.avm,  data, phy,     0x250000, 0x100000,
+      main_b.avm,data, phy,     0x350000, 0x100000,
+      """
+
+      app = "application bytes"
+      File.write!(Path.join(tmp_dir, "app.avm"), app)
+
+      write_entry("one", "dependencies: {}\n", table)
+
+      put_matrix(
+        one: [chips: ["esp32p4"], app_partitions: ["main.avm", "main_b.avm"], app_avm: "app.avm"]
+      )
+
+      write_idf_script(idf_path, """
+      mkdir -p build
+      cp -R #{fixtures}/. build/
+      cp #{fixtures}/sdkconfig sdkconfig
+      exit 0
+      """)
+
+      output =
+        capture_io(fn ->
+          Build.run([
+            "--atomvm-path",
+            atomvm_path,
+            "--idf-path",
+            idf_path,
+            "--matrix",
+            "one",
+            "--with-zips"
+          ])
+        end)
+
+      assert output =~ "Writing the application into main.avm at 0x250000..."
+      assert output =~ "Writing the application into main_b.avm at 0x350000..."
+
+      image = File.read!("_build/atomvm_images/atomvm-esp32p4-one-elixir.img")
+      assert binary_part(image, 0x250000, byte_size(app)) == app
+      assert binary_part(image, 0x350000, byte_size(app)) == app
+
+      zip = File.read!("_build/atomvm_images/atomvm-esp32p4-one-elixir.zip")
+      assert {:ok, names} = Esp32FirmwareImages.bundle_members(zip)
+      assert "main.avm" in names
+      assert "main_b.avm" in names
+
+      assert {:ok, %{"FLASH.txt" => flash}} =
+               Esp32FirmwareImages.bundle_extract(zip, ["FLASH.txt"])
+
+      assert flash =~ "this image also carries the application, in main.avm at 0x250000"
+      assert flash =~ "main_b.avm at 0x350000"
+      refute flash =~ "main.avm is left untouched"
+    end)
+  end
+
+  test "--matrix refuses an application bigger than its partition", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      atomvm_path = fake_atomvm_tree(tmp_dir)
+      idf_path = Path.join(tmp_dir, "idf.py")
+      fixtures = write_build_fixtures(tmp_dir)
+
+      table = """
+      nvs,       data, nvs,     0x9000,   0x6000,
+      phy_init,  data, phy,     0xf000,   0x1000,
+      factory,   app,  factory, 0x10000,  0x1C0000,
+      boot.avm,  data, phy,     0x1D0000, 0x80000,
+      main.avm,  data, phy,     0x250000, 0x100,
+      """
+
+      File.write!(Path.join(tmp_dir, "app.avm"), :binary.copy(<<0xAB>>, 0x101))
+      write_entry("one", "dependencies: {}\n", table)
+
+      put_matrix(one: [chips: ["esp32p4"], app_partitions: ["main.avm"], app_avm: "app.avm"])
+
+      write_idf_script(idf_path, """
+      mkdir -p build
+      cp -R #{fixtures}/. build/
+      cp #{fixtures}/sdkconfig sdkconfig
+      exit 0
+      """)
+
+      output =
+        capture_io(fn ->
+          assert catch_exit(
+                   Build.run([
+                     "--atomvm-path",
+                     atomvm_path,
+                     "--idf-path",
+                     idf_path,
+                     "--matrix",
+                     "one"
+                   ])
+                 ) == {:shutdown, 1}
+        end)
+
+      assert output =~ "the application is 257 bytes, main.avm holds 256 bytes"
+    end)
+  end
+
   defp put_matrix(config) do
     Application.put_env(:exatomvm, :atomvm_builder, config)
     on_exit(fn -> Application.delete_env(:exatomvm, :atomvm_builder) end)

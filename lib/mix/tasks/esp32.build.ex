@@ -100,6 +100,19 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
   an error, and a fragment holds only CONFIG_* assignments, "# CONFIG_* is not
   set" lines, and comments. Components stay one file per build.
 
+  A build can also write this project's application into the image, so one
+  flash installs the virtual machine and the app:
+
+      atomvm_builder: [
+        tdeck: [chips: ["esp32s3"], features: ["psram"], app_partitions: ["main.avm"]]
+      ]
+
+  `app_partitions` names the partitions the packed application
+  (`mix atomvm.packbeam`, run for the current MIX_ENV) is written into, and
+  `app_avm` takes the path of an avm to use instead of packing the project. An
+  application bigger than its partition is an error. The bundle carries the
+  application too, and its FLASH.txt says which partitions hold it.
+
   ## Examples
 
       # Build from local repository
@@ -315,6 +328,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     %{
       name: nil,
       output_name: nil,
+      app: %{partitions: [], avm: nil},
       dir: nil,
       chips: parse_chips(Keyword.get(opts, :chip, @default_chip)),
       features: [],
@@ -383,6 +397,8 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
          :ok <- check_escript(),
          :ok <- ExAtomVM.AtomVMBuilder.build_generic_unix(atomvm_path, mbedtls_prefix, clean) do
       if not matrix? and is_nil(hd(builds).components), do: offer_component_example()
+
+      builds = with_apps(builds)
 
       results =
         Enum.flat_map(builds, fn build ->
@@ -497,7 +513,8 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
       build_dir: Path.join(platform_dir, "build"),
       platform_dir: platform_dir,
       chip: chip,
-      partitions: build.partition_table && build.partition_table.content
+      partitions: build.partition_table && build.partition_table.content,
+      app: bundle_app(build.app)
     }
 
     case Esp32FirmwareBundle.write(options) do
@@ -505,6 +522,111 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
       {:error, reason} -> {:error, "could not write the bundle: #{reason}"}
     end
   end
+
+  # The application is not part of AtomVM's mkimage output, so it is written
+  # into the image afterwards, in every partition the build names.
+  defp write_app(image_path, _platform_dir, %{app: %{partitions: []}}), do: {:ok, image_path}
+
+  defp write_app(image_path, platform_dir, build) do
+    override = build.partition_table && build.partition_table.content
+
+    with {:ok, csv} <- Esp32FirmwareBundle.partition_csv(platform_dir, override),
+         {:ok, avm} <- read_app(build.app.avm) do
+      table = Esp32FirmwareBundle.partition_table(csv)
+
+      case put_app(File.read!(image_path), table, build.app.partitions, avm) do
+        {:ok, image} ->
+          File.write!(image_path, image)
+          {:ok, image_path}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp read_app(path) do
+    case File.read(path) do
+      {:ok, avm} when byte_size(avm) > 0 -> {:ok, avm}
+      {:ok, _empty} -> {:error, "#{path} is empty"}
+      {:error, reason} -> {:error, "cannot read #{path}: #{:file.format_error(reason)}"}
+    end
+  end
+
+  defp put_app(image, table, partitions, avm) do
+    Enum.reduce_while(partitions, {:ok, image}, fn name, {:ok, image} ->
+      case Map.fetch(table, name) do
+        {:ok, %{offset: offset, size: size}} when byte_size(avm) <= size ->
+          case put_at(image, offset, avm) do
+            {:ok, image} ->
+              IO.puts("Writing the application into #{name} at #{hex_address(offset)}...")
+              {:cont, {:ok, image}}
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
+
+        {:ok, %{size: size}} ->
+          {:halt,
+           {:error, "the application is #{byte_size(avm)} bytes, #{name} holds #{size} bytes"}}
+
+        :error ->
+          {:halt, {:error, "the partition table has no #{name} partition"}}
+      end
+    end)
+  end
+
+  # Splices bytes into the image at an offset, filling the gap with erased
+  # flash. The target region must be erased already, so a partition that
+  # overlaps the VM or the boot library is refused rather than corrupted.
+  defp put_at(image, offset, bytes) do
+    bytes_size = byte_size(bytes)
+    padded = pad_to(image, offset + bytes_size)
+
+    if binary_part(padded, offset, bytes_size) == :binary.copy(<<0xFF>>, bytes_size) do
+      prefix = binary_part(padded, 0, offset)
+      rest = binary_part(padded, offset + bytes_size, byte_size(padded) - offset - bytes_size)
+      {:ok, prefix <> bytes <> rest}
+    else
+      {:error,
+       "the image already holds data at #{hex_address(offset)}, where #{bytes_size} " <>
+         "bytes of application would go"}
+    end
+  end
+
+  defp pad_to(image, size) when byte_size(image) >= size, do: image
+  defp pad_to(image, size), do: image <> :binary.copy(<<0xFF>>, size - byte_size(image))
+
+  defp hex_address(offset), do: "0x" <> Integer.to_string(offset, 16)
+
+  # Packs this project's application once for the builds that want it, and
+  # leaves the builds that name their own avm alone.
+  defp with_apps(builds) do
+    project_avm =
+      if Enum.any?(builds, &(&1.app.partitions != [] and is_nil(&1.app.avm))) do
+        pack_project_app()
+      end
+
+    Enum.map(builds, fn build ->
+      if build.app.partitions == [] or build.app.avm do
+        build
+      else
+        %{build | app: %{build.app | avm: project_avm}}
+      end
+    end)
+  end
+
+  defp pack_project_app do
+    IO.puts("Packing the project's application...")
+
+    case Mix.Tasks.Atomvm.Packbeam.run([]) do
+      {:ok, _} -> Path.expand("#{Mix.Project.config()[:app]}.avm")
+      _error -> error_exit("could not pack the project's application")
+    end
+  end
+
+  defp bundle_app(%{partitions: []}), do: nil
+  defp bundle_app(app), do: app
 
   defp warn_forced_clean(build, chip, custom_sdkconfig?) do
     if build.partition_table do
@@ -714,12 +836,15 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
 
               case build_status do
                 0 ->
-                  create_flashable_image(
-                    Path.expand(atomvm_path),
-                    Path.expand(build_dir),
-                    use_docker,
-                    Esp32BuildMatrix.image_stem(build.output_name, chip)
-                  )
+                  with {:ok, img} <-
+                         create_flashable_image(
+                           Path.expand(atomvm_path),
+                           Path.expand(build_dir),
+                           use_docker,
+                           Esp32BuildMatrix.image_stem(build.output_name, chip)
+                         ) do
+                    write_app(img, platform_dir, build)
+                  end
 
                 _status ->
                   {:error, "Build failed"}
