@@ -75,6 +75,24 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
   written as `atomvm-<build>-<chip>-elixir.img`, and `--chip` overrides the
   chips of every selected build.
 
+  Builds may select shared `features`, declared under the reserved `features`
+  key, which contribute an sdkconfig fragment and CMake arguments:
+
+      atomvm_builder: [
+        features: [
+          psram: [
+            sdkconfig: "atomvm_builder/features/psram.sdkconfig",
+            cmake_args: ["-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"]
+          ]
+        ],
+        full: [chips: ["esp32s3"], features: ["psram"]]
+      ]
+
+  A fragment is appended before the build's own sdkconfig files, so the build
+  can override a feature. Two selected features setting the same CONFIG_ key is
+  an error, and a fragment holds only CONFIG_* assignments, "# CONFIG_* is not
+  set" lines, and comments. Components stay one file per build.
+
   ## Examples
 
       # Build from local repository
@@ -219,6 +237,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
         [
           "  #{plan.name}: #{Enum.join(plan.chips, ", ")}",
           "    directory: #{plan.dir}",
+          plan.features != [] && "    features: #{Enum.join(plan.features, ", ")}",
           plan.cmake_args != [] && "    cmake_args: #{Enum.join(plan.cmake_args, " ")}",
           plan.components && "    components: #{plan.components}",
           plan.sdkconfig && "    sdkconfig: #{plan.sdkconfig}",
@@ -281,6 +300,8 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
       name: nil,
       dir: nil,
       chips: parse_chips(Keyword.get(opts, :chip, @default_chip)),
+      features: [],
+      feature_sdkconfigs: [],
       cmake_args: [],
       components: components,
       sdkconfig: Keyword.get(opts, :sdkconfig),
@@ -415,7 +436,9 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
         :ok
     end
 
-    custom_sdkconfig? = match?({:ok, _}, custom_sdkconfig_paths(build.sdkconfig, chip))
+    custom_sdkconfig? =
+      build.feature_sdkconfigs != [] or
+        match?({:ok, _}, custom_sdkconfig_paths(build.sdkconfig, chip))
 
     if not matrix? and not clean do
       warn_forced_clean(build, chip, custom_sdkconfig?)
@@ -599,7 +622,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
 
     Esp32CustomPartitions.with_custom_partitions(platform_dir, build.partition_table, fn ->
-      with_staged_sdkconfig(platform_dir, chip, build.sdkconfig, fn ->
+      with_staged_sdkconfig(platform_dir, chip, build, fn ->
         Esp32CustomComponents.with_custom_components(platform_dir, build.components, fn ->
           if clean and File.dir?(build_dir) do
             IO.puts("Cleaning build directory...")
@@ -893,18 +916,23 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     end)
   end
 
-  defp with_staged_sdkconfig(platform_dir, chip, sdkconfig, fun) do
-    case custom_sdkconfig_paths(sdkconfig, chip) do
+  defp with_staged_sdkconfig(platform_dir, chip, build, fun) do
+    case custom_sdkconfig_paths(build.sdkconfig, chip) do
       :error ->
-        fun.()
+        if build.feature_sdkconfigs == [] do
+          fun.()
+        else
+          stage_sdkconfigs(nil, build.feature_sdkconfigs, platform_dir, chip, fun)
+        end
 
       {:ok, paths} ->
-        stage_sdkconfigs(paths, platform_dir, chip, fun)
+        stage_sdkconfigs(paths, build.feature_sdkconfigs, platform_dir, chip, fun)
     end
   end
 
-  defp stage_sdkconfigs({base_path, chip_path}, platform_dir, chip, fun) do
+  defp stage_sdkconfigs(paths, feature_paths, platform_dir, chip, fun) do
     target_path = Path.join(platform_dir, "sdkconfig.defaults.#{chip}")
+    {base_path, chip_path} = paths || {nil, nil}
 
     case Esp32BuildStaging.snapshot_file(target_path) do
       {:ok, snapshot} ->
@@ -920,8 +948,11 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
         chip_content =
           if chip_path && File.exists?(chip_path), do: File.read!(chip_path), else: ""
 
+        feature_content = Enum.map_join(feature_paths, "", &(File.read!(&1) <> "\n"))
+
         appended_data =
-          "\n# User Custom Defaults\n" <> base_content <> "\n" <> chip_content <> "\n"
+          "\n# User Custom Defaults\n" <>
+            feature_content <> base_content <> "\n" <> chip_content <> "\n"
 
         try do
           IO.puts("Staging custom sdkconfig settings into #{Path.basename(target_path)}...")

@@ -418,6 +418,26 @@ atomvm_builder/full/
 
 A missing file means no customization on that axis, and `dir`, `components`, `lock`, `sdkconfig`, and `partitions` select different paths. `cmake_args` passes extra arguments to `idf.py`, as a list of strings or a single string, for example `["-DAVM_USE_LIBSODIUM=ON", "-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"]`. All inputs are read once before anything is cloned or built, then staged into the AtomVM checkout only while the build runs and restored afterwards. Matrix builds always start from a clean ESP32 build directory, since their inputs differ by definition.
 
+Shared `features`, declared once under the reserved `features` key, bundle an sdkconfig fragment and CMake arguments that builds select by name:
+
+```elixir
+atomvm_builder: [
+  features: [
+    psram: [
+      sdkconfig: "atomvm_builder/features/psram.sdkconfig",
+      cmake_args: ["-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"]
+    ],
+    libsodium: [
+      sdkconfig: "atomvm_builder/features/libsodium.sdkconfig",
+      cmake_args: ["-DAVM_USE_LIBSODIUM=ON"]
+    ]
+  ],
+  full: [chips: ["esp32s3"], features: ["psram", "libsodium"]]
+]
+```
+
+A fragment is appended before the build's own `sdkconfig` files, so a build can override a feature, and a feature's `cmake_args` come before the build's own. Two selected features setting the same `CONFIG_` key is an error, and a fragment holds only `CONFIG_*` assignments, `# CONFIG_* is not set` lines, and comments. Components stay one file per build — a feature cannot add them.
+
 ```shell
 shell$ mix atomvm.esp32.build --matrix full           # one build
 shell$ mix atomvm.esp32.build --matrix full,cam       # several

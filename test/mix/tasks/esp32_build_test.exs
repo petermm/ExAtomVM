@@ -403,6 +403,59 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
     end)
   end
 
+  test "--matrix stages feature sdkconfig before the build's own", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      atomvm_path = fake_atomvm_tree(tmp_dir)
+      captured_defaults = Path.join(tmp_dir, "captured-defaults")
+      captured_args = Path.join(tmp_dir, "captured-args")
+      idf_path = Path.join(tmp_dir, "idf.py")
+
+      write_entry("one", "dependencies: {}\n", "one partitions\n")
+      File.write!("atomvm_builder/one/sdkconfig.defaults", "CONFIG_OWN=y\n")
+
+      File.mkdir_p!("atomvm_builder/features")
+      File.write!("atomvm_builder/features/psram.sdkconfig", "CONFIG_SPIRAM=y\n")
+
+      put_matrix(
+        features: [
+          psram: [
+            sdkconfig: "atomvm_builder/features/psram.sdkconfig",
+            cmake_args: ["-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"]
+          ]
+        ],
+        one: [chips: ["esp32p4"], features: ["psram"]]
+      )
+
+      write_idf_script(idf_path, """
+      cp sdkconfig.defaults.esp32p4 "#{captured_defaults}"
+      echo "$@" > "#{captured_args}"
+      exit 1
+      """)
+
+      capture_io(fn ->
+        assert catch_exit(
+                 Build.run([
+                   "--atomvm-path",
+                   atomvm_path,
+                   "--idf-path",
+                   idf_path,
+                   "--matrix",
+                   "one"
+                 ])
+               ) == {:shutdown, 1}
+      end)
+
+      defaults = File.read!(captured_defaults)
+      assert defaults =~ "CONFIG_SPIRAM=y"
+      assert defaults =~ "CONFIG_OWN=y"
+
+      assert :binary.match(defaults, "CONFIG_SPIRAM=y") <
+               :binary.match(defaults, "CONFIG_OWN=y")
+
+      assert File.read!(captured_args) =~ "-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"
+    end)
+  end
+
   defp put_matrix(config) do
     Application.put_env(:exatomvm, :atomvm_builder, config)
     on_exit(fn -> Application.delete_env(:exatomvm, :atomvm_builder) end)

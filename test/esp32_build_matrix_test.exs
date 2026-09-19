@@ -161,6 +161,113 @@ defmodule ExAtomVM.Esp32BuildMatrixTest do
     end)
   end
 
+  test "resolves features into sdkconfig fragments and cmake args", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      write("atomvm_builder/features/psram.sdkconfig", "CONFIG_SPIRAM=y\n")
+
+      write(
+        "atomvm_builder/features/libsodium.sdkconfig",
+        "# a bigger stack\nCONFIG_ESP_MAIN_TASK_STACK_SIZE=16384\n"
+      )
+
+      config = [
+        features: [
+          psram: [
+            sdkconfig: "atomvm_builder/features/psram.sdkconfig",
+            cmake_args: ["-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1"]
+          ],
+          libsodium: [
+            sdkconfig: "atomvm_builder/features/libsodium.sdkconfig",
+            cmake_args: "-DAVM_USE_LIBSODIUM=ON"
+          ]
+        ],
+        full: [chips: ["esp32s3"], features: ["libsodium", "psram"], cmake_args: ["-DEXTRA=1"]]
+      ]
+
+      assert {:ok, [build]} = Esp32BuildMatrix.resolve(config, :all)
+
+      assert build.features == ["libsodium", "psram"]
+
+      assert build.feature_sdkconfigs == [
+               Path.expand("atomvm_builder/features/libsodium.sdkconfig"),
+               Path.expand("atomvm_builder/features/psram.sdkconfig")
+             ]
+
+      assert build.cmake_args == [
+               "-DAVM_USE_LIBSODIUM=ON",
+               "-DATOMIC_POINTER_LOCK_FREE_IS_TWO=1",
+               "-DEXTRA=1"
+             ]
+
+      assert [%{name: "full", features: ["libsodium", "psram"]}] =
+               Esp32BuildMatrix.resolve(config, :all) |> elem(1) |> Esp32BuildMatrix.plan()
+    end)
+  end
+
+  test "rejects feature mistakes", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      write("features/one.sdkconfig", "CONFIG_A=y\n")
+      write("features/two.sdkconfig", "CONFIG_A=y\n")
+
+      assert {:error, message} =
+               Esp32BuildMatrix.resolve([full: [chips: ["esp32"], features: ["nope"]]], :all)
+
+      assert message =~ "unknown feature(s): nope"
+
+      config = [
+        features: [
+          one: [sdkconfig: "features/one.sdkconfig"],
+          two: [sdkconfig: "features/two.sdkconfig"]
+        ],
+        full: [chips: ["esp32"], features: ["one", "two"]]
+      ]
+
+      assert {:error, "features one and two both set CONFIG_A"} =
+               Esp32BuildMatrix.resolve(config, :all)
+
+      assert {:error, message} =
+               Esp32BuildMatrix.resolve(
+                 [features: [one: [nope: 1]], full: [chips: ["esp32"]]],
+                 :all
+               )
+
+      assert message =~ "feature one has unknown option(s): :nope"
+
+      assert {:error, "feature one has no sdkconfig or cmake_args"} =
+               Esp32BuildMatrix.resolve([features: [one: []], full: [chips: ["esp32"]]], :all)
+    end)
+  end
+
+  test "rejects broken feature fragments", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      resolve = fn path ->
+        Esp32BuildMatrix.resolve(
+          [features: [one: [sdkconfig: path]], full: [chips: ["esp32"]]],
+          :all
+        )
+      end
+
+      assert {:error, "feature one: cannot read missing.sdkconfig: " <> _} =
+               resolve.("missing.sdkconfig")
+
+      write("empty.sdkconfig", "")
+      assert {:error, "feature one: empty.sdkconfig is empty"} = resolve.("empty.sdkconfig")
+
+      File.mkdir!("a-directory")
+
+      assert {:error, "feature one: a-directory exists but is not a regular file"} =
+               resolve.("a-directory")
+
+      write("bad.sdkconfig", "CONFIG_A=y\nnot a config\n")
+      assert {:error, message} = resolve.("bad.sdkconfig")
+      assert message =~ "bad.sdkconfig:2 is not a CONFIG_* assignment: \"not a config\""
+
+      write("twice.sdkconfig", "CONFIG_A=y\nCONFIG_A=n\n")
+      assert {:error, message} = resolve.("twice.sdkconfig")
+      assert message =~ "twice.sdkconfig:2 sets CONFIG_A twice"
+    end)
+  end
+
   test "reports a broken input with the build name" do
     assert {:error, "build full: Component manifest file does not exist: " <> _} =
              Esp32BuildMatrix.resolve(
@@ -208,5 +315,10 @@ defmodule ExAtomVM.Esp32BuildMatrixTest do
     on_exit(fn -> Application.delete_env(:exatomvm, :atomvm_builder) end)
 
     assert Esp32BuildMatrix.config()[:from_app][:chips] == ["esp32"]
+  end
+
+  defp write(path, content) do
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, content)
   end
 end
