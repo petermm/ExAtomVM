@@ -55,6 +55,7 @@ defmodule ExAtomVM.Esp32FirmwareBundleTest do
       #
       CONFIG_APP_PROJECT_VER="test"
       CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-elixir.csv"
+      CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
       """
     )
 
@@ -108,6 +109,7 @@ defmodule ExAtomVM.Esp32FirmwareBundleTest do
     assert flash =~ "ESP-IDF: 5.5.5\n"
     assert flash =~ "Flash offset: 0x0\n"
     assert flash =~ "Application partition (main.avm): 0x250000\n"
+    assert flash =~ "laid out for a 16 MB flash"
     assert flash =~ "  0x10000 atomvm-esp32.bin\n"
     assert flash =~ "mix atomvm.esp32.install --image atomvm-esp32s3-full-elixir.zip"
   end

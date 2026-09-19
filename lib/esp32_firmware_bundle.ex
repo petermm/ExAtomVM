@@ -201,6 +201,7 @@ defmodule ExAtomVM.Esp32FirmwareBundle do
     port = "--chip #{chip} --port /dev/ttyUSB0 --baud 921600"
     mode = flash["flash_mode"] || "dio"
     freq = flash["flash_freq"] || "80m"
+    flash_size = flash_size(sdkconfig)
 
     """
 
@@ -221,8 +222,8 @@ defmodule ExAtomVM.Esp32FirmwareBundle do
     -------
 
     The image holds the bootloader, the partition table, the AtomVM virtual
-    machine and its boot library, laid out for a 4 MB flash. The gaps between
-    them are filled with 0xFF, so flashing the image also erases the NVS
+    machine and its boot library, laid out for a #{flash_size} flash. The gaps
+    between them are filled with 0xFF, so flashing the image also erases the NVS
     partition (Wi-Fi settings and data stored by applications) and phy_init;
     main.avm is left untouched.
 
@@ -293,6 +294,16 @@ defmodule ExAtomVM.Esp32FirmwareBundle do
          ) do
       [_, version] -> version
       nil -> "unknown"
+    end
+  end
+
+  # The flash size the image's partition table was built for, as the sdkconfig
+  # records it (`CONFIG_ESPTOOLPY_FLASHSIZE="16MB"`). Boards that do not set one
+  # are the 4 MB AtomVM's own defaults assume.
+  defp flash_size(sdkconfig) do
+    case sdkconfig_value(sdkconfig, "CONFIG_ESPTOOLPY_FLASHSIZE") do
+      nil -> "4 MB"
+      size -> String.replace(size, "MB", " MB")
     end
   end
 
