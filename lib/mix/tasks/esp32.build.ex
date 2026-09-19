@@ -931,10 +931,11 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
 
       no_boot_library_configured?(mkimage_config) ->
         {:error,
-         "mkimage.config configures no boot library. AtomVM selects it from the " <>
-           "partition table's main.avm offset, so a custom partition table has to keep " <>
-           "main.avm at 0x250000 (0x300000 for a JIT build); boot.avm can sit anywhere, " <>
-           "it is found by partition name."}
+         "mkimage.config configures no boot library: this AtomVM picks it from the " <>
+           "partition table's main.avm offset, and this table moves main.avm. Keep it at " <>
+           "0x250000 (0x300000 for a JIT build) - boot.avm can sit anywhere, it is found " <>
+           "by partition name - or build an AtomVM whose GetBootAVM.cmake selects the " <>
+           "library from the build options instead of the layout."}
 
       true ->
         IO.puts("Creating flashable image...")

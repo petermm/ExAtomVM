@@ -613,7 +613,8 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
         end)
 
       assert output =~ "mkimage.config configures no boot library"
-      assert output =~ "keep main.avm at 0x250000"
+      assert output =~ "Keep it at 0x250000"
+      assert output =~ "GetBootAVM.cmake"
     end)
   end
 
