@@ -81,6 +81,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
   """
   use Mix.Task
   alias ExAtomVM.Esp32BuildStaging
+  alias ExAtomVM.Esp32CustomComponents
   alias ExAtomVM.Esp32CustomPartitions
 
   @shortdoc "Build AtomVM for ESP32 from source"
@@ -122,6 +123,16 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
 
     partition_table =
       case Esp32CustomPartitions.load_custom_partitions(Keyword.get(opts, :partition_table)) do
+        {:ok, selected} ->
+          selected
+
+        {:error, reason} ->
+          IO.puts("Error: #{reason}")
+          exit({:shutdown, 1})
+      end
+
+    components =
+      case Esp32CustomComponents.load_custom_components(nil) do
         {:ok, selected} ->
           selected
 
@@ -183,6 +194,8 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
          :ok <- check_esp_idf(idf_path, use_docker, idf_version),
          :ok <- check_escript(),
          :ok <- ExAtomVM.AtomVMBuilder.build_generic_unix(atomvm_path, mbedtls_prefix, clean) do
+      if is_nil(components), do: offer_component_example()
+
       custom_partitions? = not is_nil(partition_table)
 
       if custom_partitions? and not clean do
@@ -231,7 +244,8 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
                  use_docker,
                  force_clean,
                  partition_table,
-                 sdkconfig
+                 sdkconfig,
+                 components
                ) do
             {:ok, src_img} ->
               img = save_image(src_img)
@@ -365,92 +379,63 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
          use_docker,
          clean,
          partition_table,
-         sdkconfig
+         sdkconfig,
+         components
        ) do
     build_dir = Path.join([atomvm_path, "src", "platforms", "esp32", "build"])
     platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
 
-    # Copy idf_component.yml into build tree if the user has one in their project root
-    idf_component_yml = Path.join(File.cwd!(), "idf_component.yml")
-
-    idf_component_example = Path.join(File.cwd!(), "idf_component.yml.example")
-
-    if File.exists?(idf_component_yml) do
-      dest_path = Path.join([platform_dir, "main", "idf_component.yml"])
-      IO.puts("Copying idf_component.yml to #{dest_path}...")
-      File.cp!(idf_component_yml, dest_path)
-    else
-      unless File.exists?(idf_component_example) do
-        example_src = Application.app_dir(:exatomvm, "priv/idf_component.yml.example")
-        File.cp!(example_src, idf_component_example)
-      end
-
-      IO.puts(
-        "Hint: To add ESP-IDF components (e.g. NIFs), rename the example in your project root:\n" <>
-          "      mv idf_component.yml.example idf_component.yml"
-      )
-    end
-
-    # Copy dependencies.lock if it exists in the project root
-    dependencies_lock = Path.join(File.cwd!(), "dependencies.lock")
-
-    if File.exists?(dependencies_lock) do
-      dest_path = Path.join(platform_dir, "dependencies.lock")
-      IO.puts("Copying dependencies.lock to #{dest_path}...")
-      File.cp!(dependencies_lock, dest_path)
-    end
-
     Esp32CustomPartitions.with_custom_partitions(platform_dir, partition_table, fn ->
       with_staged_sdkconfig(platform_dir, chip, sdkconfig, fn ->
-        if clean and File.dir?(build_dir) do
-          IO.puts("Cleaning build directory...")
-          ExAtomVM.AtomVMBuilder.clean_dir(build_dir)
-        end
+        Esp32CustomComponents.with_custom_components(platform_dir, components, fn ->
+          if clean and File.dir?(build_dir) do
+            IO.puts("Cleaning build directory...")
+            ExAtomVM.AtomVMBuilder.clean_dir(build_dir)
+          end
 
-        IO.puts("Configuring build for #{chip}...")
+          IO.puts("Configuring build for #{chip}...")
 
-        {_output, status} =
-          run_idf_command(
-            use_docker,
-            idf_version,
-            atomvm_path,
-            platform_dir,
-            idf_path,
-            idf_set_target_args(chip)
-          )
+          {_output, status} =
+            run_idf_command(
+              use_docker,
+              idf_version,
+              atomvm_path,
+              platform_dir,
+              idf_path,
+              idf_set_target_args(chip)
+            )
 
-        case status do
-          0 ->
-            IO.puts("Building AtomVM... (this may take several minutes)")
+          case status do
+            0 ->
+              IO.puts("Building AtomVM... (this may take several minutes)")
 
-            {_output, build_status} =
-              run_idf_command(
-                use_docker,
-                idf_version,
-                atomvm_path,
-                platform_dir,
-                idf_path,
-                idf_build_args()
-              )
-
-            case build_status do
-              0 ->
-                copy_dependencies_lock(platform_dir)
-
-                create_flashable_image(
-                  Path.expand(atomvm_path),
-                  Path.expand(build_dir),
-                  chip,
-                  use_docker
+              {_output, build_status} =
+                run_idf_command(
+                  use_docker,
+                  idf_version,
+                  atomvm_path,
+                  platform_dir,
+                  idf_path,
+                  idf_build_args()
                 )
 
-              _status ->
-                {:error, "Build failed"}
-            end
+              case build_status do
+                0 ->
+                  create_flashable_image(
+                    Path.expand(atomvm_path),
+                    Path.expand(build_dir),
+                    chip,
+                    use_docker
+                  )
 
-          _status ->
-            {:error, "Failed to set target chip"}
-        end
+                _status ->
+                  {:error, "Build failed"}
+              end
+
+            _status ->
+              {:error, "Failed to set target chip"}
+          end
+        end)
       end)
     end)
   end
@@ -475,18 +460,18 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     )
   end
 
-  defp copy_dependencies_lock(platform_dir) do
-    repo_dependencies_lock = Path.join(platform_dir, "dependencies.lock")
+  defp offer_component_example do
+    example_path = Path.join(File.cwd!(), "idf_component.yml.example")
 
-    if File.exists?(repo_dependencies_lock) do
-      dest_path = Path.join(File.cwd!(), "dependencies.lock")
-
-      if not File.exists?(dest_path) or
-           File.read!(dest_path) != File.read!(repo_dependencies_lock) do
-        IO.puts("Updating project dependencies.lock from ESP-IDF component manager...")
-        File.cp!(repo_dependencies_lock, dest_path)
-      end
+    unless File.exists?(example_path) do
+      example_src = Application.app_dir(:exatomvm, "priv/idf_component.yml.example")
+      File.cp!(example_src, example_path)
     end
+
+    IO.puts(
+      "Hint: To add ESP-IDF components (e.g. NIFs), rename the example in your project root:\n" <>
+        "      mv idf_component.yml.example idf_component.yml"
+    )
   end
 
   defp create_flashable_image(atomvm_path, build_dir, chip, use_docker) do

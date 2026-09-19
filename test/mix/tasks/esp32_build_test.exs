@@ -147,4 +147,121 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
                "CONFIG_SPIRAM=y\nCONFIG_ATOMVM_CHIP_DEFAULT=y\n"
     end)
   end
+
+  test "stages the component manifest for the build and removes it afterwards", %{
+    tmp_dir: tmp_dir
+  } do
+    File.cd!(tmp_dir, fn ->
+      atomvm_path = fake_atomvm_tree(tmp_dir)
+      platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
+      manifest_path = Path.join([platform_dir, "main", "idf_component.yml"])
+      lock_path = Path.join(platform_dir, "dependencies.lock")
+      captured_manifest = Path.join(tmp_dir, "captured-manifest")
+      captured_lock = Path.join(tmp_dir, "captured-lock")
+      idf_path = Path.join(tmp_dir, "idf.py")
+
+      File.write!(
+        "idf_component.yml",
+        "dependencies:\n  atomgl:\n    git: https://example.com/atomgl\n"
+      )
+
+      File.write!("dependencies.lock", "project lock")
+
+      write_idf_script(idf_path, """
+      cp main/idf_component.yml "#{captured_manifest}"
+      cp dependencies.lock "#{captured_lock}"
+      exit 1
+      """)
+
+      capture_io(fn ->
+        assert catch_exit(
+                 Build.run([
+                   "--atomvm-path",
+                   atomvm_path,
+                   "--idf-path",
+                   idf_path,
+                   "--chip",
+                   "esp32p4"
+                 ])
+               ) == {:shutdown, 1}
+      end)
+
+      assert File.read!(captured_manifest) == File.read!("idf_component.yml")
+      assert File.read!(captured_lock) == "project lock"
+      refute File.exists?(manifest_path)
+      refute File.exists?(lock_path)
+    end)
+  end
+
+  test "a build without a manifest does not reuse a staged one", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      atomvm_path = fake_atomvm_tree(tmp_dir)
+      platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
+      manifest_path = Path.join([platform_dir, "main", "idf_component.yml"])
+      idf_path = Path.join(tmp_dir, "idf.py")
+      seen = Path.join(tmp_dir, "seen")
+
+      File.write!("idf_component.yml", "dependencies: {}\n")
+      write_idf_script(idf_path, "exit 1\n")
+
+      capture_io(fn ->
+        assert catch_exit(
+                 Build.run([
+                   "--atomvm-path",
+                   atomvm_path,
+                   "--idf-path",
+                   idf_path,
+                   "--chip",
+                   "esp32p4"
+                 ])
+               ) == {:shutdown, 1}
+      end)
+
+      refute File.exists?(manifest_path)
+
+      File.rm!("idf_component.yml")
+
+      write_idf_script(idf_path, """
+      if [ -f main/idf_component.yml ]; then echo yes > "#{seen}"; else echo no > "#{seen}"; fi
+      exit 1
+      """)
+
+      capture_io(fn ->
+        assert catch_exit(
+                 Build.run([
+                   "--atomvm-path",
+                   atomvm_path,
+                   "--idf-path",
+                   idf_path,
+                   "--chip",
+                   "esp32p4"
+                 ])
+               ) == {:shutdown, 1}
+      end)
+
+      assert File.read!(seen) == "no\n"
+    end)
+  end
+
+  defp fake_atomvm_tree(tmp_dir) do
+    atomvm_path = Path.join(tmp_dir, "AtomVM")
+    platform_dir = Path.join([atomvm_path, "src", "platforms", "esp32"])
+
+    File.mkdir_p!(Path.join(platform_dir, "main"))
+    File.mkdir_p!(Path.join([atomvm_path, "build", "tools", "packbeam"]))
+    File.mkdir_p!(Path.join([atomvm_path, "build", "libs", "esp32boot"]))
+    File.write!(Path.join([atomvm_path, "build", "tools", "packbeam", "PackBEAM"]), "")
+
+    File.write!(
+      Path.join([atomvm_path, "build", "libs", "esp32boot", "elixir_esp32boot.avm"]),
+      ""
+    )
+
+    atomvm_path
+  end
+
+  defp write_idf_script(path, body) do
+    File.write!(path, "#!/bin/sh\n" <> body)
+    File.chmod!(path, 0o755)
+  end
 end
