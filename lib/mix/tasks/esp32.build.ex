@@ -15,6 +15,9 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
 
   **Without Docker:**
     * ESP-IDF (v5.5.4 or later recommended)
+    * On macOS, AtomVM's generic Unix build needs MbedTLS 3.x. Homebrew's
+      default `mbedtls` is 4.x, so pass
+      `--mbedtls-prefix /opt/homebrew/opt/mbedtls@3 --clean` (see the README)
 
   **With Docker (--use-docker flag):**
     * Docker

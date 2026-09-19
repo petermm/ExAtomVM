@@ -323,6 +323,15 @@ If no AtomVM source is supplied, the task clones the AtomVM `main` branch automa
 * **Without Docker:** CMake (3.13+), Ninja (preferred) or Make, and ESP-IDF (v5.5.4 or later recommended)
 * **With Docker (`--use-docker`):** Docker. Note that Docker build support requires AtomVM `main` from Jan 2, 2026 or later; earlier AtomVM versions must be built with a local ESP-IDF toolchain.
 
+The host-side tools the build needs (`PackBEAM` and `esp32boot`) are built with CMake and MbedTLS. AtomVM supports MbedTLS 3.x, but Homebrew's default `mbedtls` formula is 4.x, whose CMake package no longer defines the `MbedTLS::mbedcrypto` target, so the generic Unix build fails to configure. Point it at the keg-only 3.x formula:
+
+```shell
+shell$ brew install mbedtls@3
+shell$ mix atomvm.esp32.build --mbedtls-prefix /opt/homebrew/opt/mbedtls@3 --clean
+```
+
+`--clean` is needed when an earlier run already configured the build directory against MbedTLS 4.x, since CMake caches the MbedTLS package path and the failed PSA check. `--mbedtls-prefix` falls back to the `MBEDTLS_PREFIX` environment variable.
+
 #### Options
 
 | Option | Default | Description |
