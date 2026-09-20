@@ -251,7 +251,7 @@ defmodule ExAtomVM.Esp32FirmwareBundle do
         {"sdkconfig", sdkconfig},
         {"partitions.csv", partitions},
         {"FLASH.txt", flash_txt}
-      ] ++ Enum.map(parts, &{&1.name, &1.data}) ++ debug
+      ] ++ Enum.map(parts ++ apps, &{&1.name, &1.data}) ++ debug
 
     [
       {"#{stem}.img", image},

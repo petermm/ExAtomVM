@@ -125,6 +125,47 @@ defmodule ExAtomVM.Esp32FirmwareBundleTest do
     assert bundle.partitions_csv == @partitions
   end
 
+  test "carries an application the image holds, and lists it in the checksums", ctx do
+    app = "application bytes"
+    app_path = Path.join(ctx.tmp_dir, "app.avm")
+    File.write!(app_path, app)
+
+    image = pad(File.read!(ctx.image), 0x350000 + byte_size(app))
+    image = image |> put(0x250000, app) |> put(0x350000, app)
+    File.write!(ctx.image, image)
+
+    partitions =
+      Map.get(ctx, :partitions, @partitions) <>
+        "alt.avm,  data, phy,     0x350000, 0x100000\n"
+
+    assert {:ok, zip} = write_app(ctx, partitions, app_path)
+
+    assert {:ok, members} =
+             Esp32FirmwareImages.bundle_extract(File.read!(zip), [
+               "main.avm",
+               "alt.avm",
+               "SHA256SUMS",
+               "FLASH.txt"
+             ])
+
+    assert members["main.avm"] == app
+    assert members["alt.avm"] == app
+    assert members["SHA256SUMS"] =~ "  main.avm\n"
+    assert members["SHA256SUMS"] =~ "  alt.avm\n"
+
+    assert members["FLASH.txt"] =~
+             "this image also carries the application, in main.avm at 0x250000"
+
+    assert members["FLASH.txt"] =~ "alt.avm at 0x350000"
+    refute members["FLASH.txt"] =~ "main.avm is left untouched"
+
+    # An application that does not fit its partition is refused.
+    tiny = "main.avm, data, phy,     0x250000, 0x10,\n"
+
+    assert {:error, message} = write_app(ctx, tiny, app_path)
+    assert message == "the application is 17 bytes, main.avm holds 16 bytes"
+  end
+
   test "refuses a part that differs from the image", ctx do
     File.write!(Path.join(ctx.build_dir, "atomvm-esp32.bin"), "other bytes")
 
@@ -153,6 +194,21 @@ defmodule ExAtomVM.Esp32FirmwareBundleTest do
     assert message =~ "cannot read"
     assert message =~ "flasher_args.json"
   end
+
+  defp write_app(ctx, partitions, avm) do
+    Esp32FirmwareBundle.write(%{
+      stem: "atomvm-esp32s3-full-elixir",
+      image: ctx.image,
+      build_dir: ctx.build_dir,
+      platform_dir: ctx.platform_dir,
+      chip: "esp32s3",
+      partitions: partitions,
+      app: %{partitions: ["main.avm", "alt.avm"], avm: avm}
+    })
+  end
+
+  defp pad(image, size) when byte_size(image) >= size, do: image
+  defp pad(image, size), do: image <> :binary.copy(<<0xFF>>, size - byte_size(image))
 
   defp write(ctx) do
     Esp32FirmwareBundle.write(%{
