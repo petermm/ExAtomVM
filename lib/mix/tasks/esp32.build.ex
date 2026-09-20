@@ -163,6 +163,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
   """
   use Mix.Task
   alias ExAtomVM.Esp32BuildMatrix
+  alias ExAtomVM.Esp32BuildOutput
   alias ExAtomVM.Esp32BuildStaging
   alias ExAtomVM.Esp32CustomComponents
   alias ExAtomVM.Esp32CustomPartitions
@@ -411,7 +412,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
 
       print_summary(results)
 
-      if Enum.any?(results, fn {_name, _chip, status, _detail} -> status == :error end) do
+      if Enum.any?(results, fn {_name, _chip, status, _detail, _tail} -> status == :error end) do
         exit({:shutdown, 1})
       end
     else
@@ -486,17 +487,17 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
           case write_bundle(build, chip, img, atomvm_path) do
             {:ok, zip} ->
               IO.puts("Wrote #{zip}")
-              {build.name, chip, :ok, img}
+              {build.name, chip, :ok, img, []}
 
             {:error, reason} ->
-              {build.name, chip, :error, reason}
+              {build.name, chip, :error, reason, []}
           end
         else
-          {build.name, chip, :ok, img}
+          {build.name, chip, :ok, img, []}
         end
 
       {:error, reason} ->
-        {build.name, chip, :error, reason}
+        {build.name, chip, :error, reason, Esp32BuildOutput.tail()}
     end
   end
 
@@ -688,7 +689,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     cwd = File.cwd!()
 
     Enum.each(results, fn
-      {name, chip, :ok, img} ->
+      {name, chip, :ok, img, _tail} ->
         label = summary_label(name, chip)
 
         if File.exists?(img) do
@@ -697,19 +698,20 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
           IO.puts("  ⚠️  #{label}: built but image not found at #{img}")
         end
 
-      {name, chip, :error, reason} ->
+      {name, chip, :error, reason, tail} ->
         IO.puts("  ❌ #{summary_label(name, chip)}: #{reason}")
+        Enum.each(tail, &IO.puts("     #{&1}"))
     end)
 
     successful =
-      Enum.filter(results, fn {_name, _chip, status, img} ->
+      Enum.filter(results, fn {_name, _chip, status, img, _tail} ->
         status == :ok and File.exists?(img)
       end)
 
     if successful != [] do
       IO.puts("\nTo flash a specific image:")
 
-      Enum.each(successful, fn {_name, _chip, _status, img} ->
+      Enum.each(successful, fn {_name, _chip, _status, img, _tail} ->
         IO.puts("  mix atomvm.esp32.install --image #{relative_path(img, cwd)}")
       end)
     end
@@ -892,7 +894,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
     System.cmd(idf_path, idf_args,
       cd: platform_dir,
       stderr_to_stdout: true,
-      into: IO.stream(:stdio, :line)
+      into: Esp32BuildOutput.collectable()
     )
   end
 
@@ -911,6 +913,10 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
   end
 
   defp create_flashable_image(atomvm_path, build_dir, use_docker, stem) do
+    # A failure before mkimage runs should report nothing but its own reason,
+    # not the tail of the build that just finished.
+    Esp32BuildOutput.clear()
+
     mkimage_erl = Path.join(build_dir, "mkimage.erl")
     mkimage_config = Path.join(build_dir, "mkimage.config")
     output_img = Path.join(build_dir, "#{stem}.img")
@@ -978,7 +984,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
             [mkimage_erl, "--config", local_config, "--out", output_img],
             cd: build_dir,
             stderr_to_stdout: true,
-            into: IO.stream(:stdio, :line)
+            into: Esp32BuildOutput.collectable()
           )
 
         case status do
@@ -1049,7 +1055,7 @@ defmodule Mix.Tasks.Atomvm.Esp32.Build do
 
     System.cmd("docker", docker_args,
       stderr_to_stdout: true,
-      into: IO.stream(:stdio, :line)
+      into: Esp32BuildOutput.collectable()
     )
   end
 

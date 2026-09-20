@@ -618,6 +618,80 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
     end)
   end
 
+  test "--matrix reports a failing step's output under the build", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      atomvm_path = fake_atomvm_tree(tmp_dir)
+      idf_path = Path.join(tmp_dir, "idf.py")
+
+      put_matrix(one: [chips: ["esp32p4"]])
+
+      write_idf_script(idf_path, """
+      echo "Configuring build for esp32p4..."
+      echo "CMake Error: app partition is too small" >&2
+      echo "ninja: build stopped: subcommand failed." >&2
+      exit 1
+      """)
+
+      output =
+        capture_io(fn ->
+          assert catch_exit(
+                   Build.run([
+                     "--atomvm-path",
+                     atomvm_path,
+                     "--idf-path",
+                     idf_path,
+                     "--matrix",
+                     "one"
+                   ])
+                 ) == {:shutdown, 1}
+        end)
+
+      assert output =~ "  ❌ one (esp32p4): Failed to set target chip\n"
+      assert output =~ "     CMake Error: app partition is too small\n"
+      assert output =~ "     ninja: build stopped: subcommand failed.\n"
+    end)
+  end
+
+  test "--matrix reports a failed image step under the build", %{tmp_dir: tmp_dir} do
+    File.cd!(tmp_dir, fn ->
+      atomvm_path = fake_atomvm_tree(tmp_dir)
+      idf_path = Path.join(tmp_dir, "idf.py")
+      fixtures = write_build_fixtures(tmp_dir)
+
+      write_entry("one", "dependencies: {}\n", @partitions)
+      put_matrix(one: [chips: ["esp32p4"]])
+
+      write_failing_mkimage_script(
+        Path.join(fixtures, "mkimage.erl"),
+        "No esp32boot library configured, an image cannot be created."
+      )
+
+      write_idf_script(idf_path, """
+      mkdir -p build
+      cp -R #{fixtures}/. build/
+      cp #{fixtures}/sdkconfig sdkconfig
+      exit 0
+      """)
+
+      output =
+        capture_io(fn ->
+          assert catch_exit(
+                   Build.run([
+                     "--atomvm-path",
+                     atomvm_path,
+                     "--idf-path",
+                     idf_path,
+                     "--matrix",
+                     "one"
+                   ])
+                 ) == {:shutdown, 1}
+        end)
+
+      assert output =~ "  ❌ one (esp32p4): Failed to create image\n"
+      assert output =~ "     No esp32boot library configured, an image cannot be created.\n"
+    end)
+  end
+
   test "--matrix writes the project application into the named partitions", %{tmp_dir: tmp_dir} do
     File.cd!(tmp_dir, fn ->
       atomvm_path = fake_atomvm_tree(tmp_dir)
@@ -801,6 +875,19 @@ defmodule Mix.Tasks.Atomvm.Esp32.BuildTest do
     write_mkimage_script(Path.join(dir, "mkimage.erl"), Path.join(dir, "image"))
 
     dir
+  end
+
+  # A stand-in for a mkimage.erl that cannot create an image, such as one whose
+  # config has no boot library.
+  defp write_failing_mkimage_script(path, message) do
+    File.write!(path, """
+    -module(mkimage).
+    -export([main/1]).
+
+    main(_Args) ->
+        io:format("~s~n", ["#{message}"]),
+        halt(254).
+    """)
   end
 
   # A stand-in for the mkimage.erl the AtomVM build generates: it writes the

@@ -116,7 +116,7 @@ defmodule ExAtomVM.AtomVMBuilder do
         System.cmd("cmake", cmake_args,
           cd: build_dir,
           stderr_to_stdout: true,
-          into: IO.stream(:stdio, :line)
+          into: ExAtomVM.Esp32BuildOutput.collectable()
         )
 
       case status do
@@ -127,7 +127,7 @@ defmodule ExAtomVM.AtomVMBuilder do
             System.cmd(build_tool, ["PackBEAM", "elixir_esp32boot", "exavmlib", "atomvmlib"],
               cd: build_dir,
               stderr_to_stdout: true,
-              into: IO.stream(:stdio, :line)
+              into: ExAtomVM.Esp32BuildOutput.collectable()
             )
 
           case status do
@@ -136,11 +136,11 @@ defmodule ExAtomVM.AtomVMBuilder do
               :ok
 
             _ ->
-              {:error, "Failed to build generic Unix tools"}
+              {:error, failed_step("Failed to build generic Unix tools")}
           end
 
         _ ->
-          {:error, "Failed to configure generic Unix build"}
+          {:error, failed_step("Failed to configure generic Unix build")}
       end
     end
   end
@@ -184,6 +184,15 @@ defmodule ExAtomVM.AtomVMBuilder do
   end
 
   # --- Private git helpers ---
+
+  # The failing command's last lines belong with its reason, which the build task
+  # prints at the end of the run.
+  defp failed_step(reason) do
+    case ExAtomVM.Esp32BuildOutput.tail() do
+      [] -> reason
+      tail -> reason <> "\n" <> Enum.map_join(tail, "\n", &("  " <> &1))
+    end
+  end
 
   defp clone_repo(url, repo_path, cache_dir, ref) do
     IO.puts("Cloning #{url}")
