@@ -10,10 +10,18 @@ defmodule ExAtomVM.PackBEAM do
         start_module: start_module || :undefined,
         # lib mode: modules exporting start/0 are not flagged as entrypoints
         lib: is_nil(start_module),
-        include_lines: Keyword.get(opts, :include_lines, false)
+        include_lines: Keyword.get(opts, :include_lines, false),
+        avm_labels: avm_labels(opts)
       }
 
       create(out, inputs, options)
+    end
+  end
+
+  defp avm_labels(opts) do
+    case {Keyword.get(opts, :avm_labels, false), Keyword.get(opts, :avm_label_width, 32)} do
+      {false, _width} -> false
+      {true, width} -> %{label_width: width}
     end
   end
 

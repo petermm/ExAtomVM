@@ -29,6 +29,8 @@ defmodule Mix.Tasks.Atomvm.Packbeam do
 
     * `:start` - The name of the module containing the start/0 entrypoint function. Only to be used to override the `:start` options defined in the the projects `mix.exs` This would not normally be needed, unless the user had an alternate mode of operation e.g like a client/server app that normally builds the client, but when building the server uses a different start module.
     * `:include_lines` - When `true`, line number information (the `Line` chunk) is kept in the packed BEAM files, so that stack traces on AtomVM carry line numbers, at the cost of a bigger AVM file. Defaults to `false`.
+    * `:avm_labels` - When `true`, generate `avmL` label tables for the packed bytecode modules. Defaults to `false`.
+    * `:avm_label_width` - Label offset width, `32` (the default) or `:auto` to use 16-bit offsets where the code fits. Only used when `:avm_labels` is enabled.
 
   ## Command line options
 
@@ -36,7 +38,9 @@ defmodule Mix.Tasks.Atomvm.Packbeam do
   as the [supported properties](#module-configuration)
 
   For example, you can use the `--start` option to specify or override the `start` property,
-  or the `--include_lines` flag to enable the `include_lines` property.
+  or the `--include_lines` flag to enable the `include_lines` property. Similarly,
+  `--avm-labels` / `--no-avm-labels` enables or disables `avm_labels`, and
+  `--avm-label-width 32|auto` selects the `avm_label_width`.
   """
 
   alias ExAtomVM.PackBEAM
@@ -82,10 +86,21 @@ defmodule Mix.Tasks.Atomvm.Packbeam do
   end
 
   defp pack_opts(options, avm_config) do
+    avm_labels = option(options, avm_config, :avm_labels, false)
+    avm_label_width = option(options, avm_config, :avm_label_width, 32)
+
+    unless avm_labels in [true, false], do: Mix.raise(":avm_labels must be true or false")
+    unless avm_label_width in [32, :auto], do: Mix.raise(":avm_label_width must be 32 or :auto")
+
     [
-      include_lines:
-        Map.get(options, :include_lines, Keyword.get(avm_config, :include_lines, false))
+      include_lines: option(options, avm_config, :include_lines, false),
+      avm_labels: avm_labels,
+      avm_label_width: avm_label_width
     ]
+  end
+
+  defp option(options, avm_config, key, default) do
+    Map.get(options, key, Keyword.get(avm_config, key, default))
   end
 
   defp pack_avm_deps(pack_opts) do
@@ -237,6 +252,22 @@ defmodule Mix.Tasks.Atomvm.Packbeam do
 
   defp parse_args([<<"--include_lines">> | t], accum) do
     parse_args(t, Map.put(accum, :include_lines, true))
+  end
+
+  defp parse_args([<<"--avm-labels">> | t], accum) do
+    parse_args(t, Map.put(accum, :avm_labels, true))
+  end
+
+  defp parse_args([<<"--no-avm-labels">> | t], accum) do
+    parse_args(t, Map.put(accum, :avm_labels, false))
+  end
+
+  defp parse_args([<<"--avm-label-width">>, width | t], accum) when width in ["32", "auto"] do
+    parse_args(t, Map.put(accum, :avm_label_width, if(width == "32", do: 32, else: :auto)))
+  end
+
+  defp parse_args([<<"--avm-label-width">> | _], _accum) do
+    Mix.raise("--avm-label-width expects 32 or auto")
   end
 
   defp parse_args([_ | t], accum) do

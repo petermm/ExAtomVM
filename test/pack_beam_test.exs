@@ -237,4 +237,40 @@ defmodule ExAtomVM.PackBEAMTest do
     assert stderr =~ "Cannot pack #{out(dir, "x.avm")}"
     refute File.exists?(out(dir, "x.avm"))
   end
+
+  test "avm_labels adds avmL tables to bytecode modules without changing the code",
+       %{dir: dir, beams: beams} do
+    lib_avm = out(dir, "labels_deps.avm")
+    assert :ok = PackBEAM.make_avm([{beams.pb_lib, :beam}], lib_avm)
+
+    inputs = [{beams.pb_start, :beam_start}, {beams.pb_other, :beam}, {lib_avm, :avm}]
+    plain = out(dir, "plain.avm")
+    assert :ok = PackBEAM.make_avm(inputs, plain)
+
+    for {file, label_width, entry_size} <- [{"wide", 32, 4}, {"narrow", :auto, 2}] do
+      avm = out(dir, "#{file}.avm")
+      assert :ok = PackBEAM.make_avm(inputs, avm, avm_labels: true, avm_label_width: label_width)
+
+      # pb_lib is only present in the AVM file, the other modules are BEAM files
+      for module <- ["pb_start.beam", "pb_other.beam", "pb_lib.beam"] do
+        packed = Map.new(chunks(element(avm, module)))
+        original = Map.new(chunks(element(plain, module)))
+
+        assert packed[~c"Code"] == original[~c"Code"]
+        refute Map.has_key?(original, ~c"avmL")
+
+        <<last::32-little, flags::16-little, count::16-little, entries::binary>> =
+          packed[~c"avmL"]
+
+        <<_header::binary-size(12), labels::32, _functions::32, opcodes::binary>> =
+          packed[~c"Code"]
+
+        assert flags == if(label_width == 32, do: 1, else: 0)
+        assert count == labels
+        assert byte_size(entries) == labels * entry_size
+        # the last table entry points at the label that closes the code
+        assert :binary.at(opcodes, last) == 3
+      end
+    end
+  end
 end
